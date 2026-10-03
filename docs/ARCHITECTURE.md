@@ -8,4 +8,10 @@ The request workflow is route → retrieve bounded context → execute relevant 
 
 Provider interfaces cover inference, embeddings, vision, images, search, web fetch, memory/vector stores, files, email/calendar, tools, games and scheduling. SQLite FTS5 provides lexical search; vector implementation is isolated. Optional integrations can be unavailable without preventing chat or local data management.
 
-API conventions: `/api/health`, `/api/models`, `/api/settings`, `/api/conversations`, `/api/memories`, `/api/files`, `/api/web`, `/api/images`, `/api/google`, `/api/poker`, `/api/harness`. IDs are stable strings. Streaming chat uses newline-delimited JSON events with `type` and event-specific fields. All errors have actionable messages.
+API conventions: `/api/health`, `/api/models`, `/api/settings`, `/api/conversations`, `/api/memory`, `/api/files`, `/api/web`, `/api/images`, `/api/google`, `/api/poker`, `/api/harness`. IDs are stable strings. Streaming chat uses newline-delimited JSON events with `type` and event-specific fields. Provider failures return setup and recovery information.
+
+Complex research uses a bounded, schema-validated tool DAG. A fetch step resolves its URL from a real search result; the model cannot invent a fetch target. Simple chat skips planning. The synthesis call receives one bounded system message containing the selected evidence, which also works with small models whose templates retain only the first system message. Unsupported tool protocol triggers at most one answer retry.
+
+Embeddings use SQLite-vec through an isolated adapter, with a portable cosine fallback. Missing vectors are SQL NULL, allowing the persistent idle indexer to reindex edited content and changed embedding roles. Summaries compact ordered message batches; extraction uses only source user messages and excludes private integration results.
+
+File edits stage and reopen a replacement, bind its exact content and original hash to an expiring single-use proposal, and retain the previous managed copy on confirmation. Google writes use the same concrete approval principle, plus version checks where available. Comfy jobs retain their submission endpoint so subsequent settings changes cannot redirect polling or cancellation.

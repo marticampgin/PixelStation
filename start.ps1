@@ -2,6 +2,10 @@ param([switch]$NoBrowser, [switch]$Check)
 $ErrorActionPreference = 'Stop'
 $projectRoot = $PSScriptRoot
 Set-Location -LiteralPath $projectRoot
+$stationPorts = Get-NetTCPConnection -LocalPort 8000,5173 -State Listen -ErrorAction SilentlyContinue
+if ($stationPorts) {
+    throw 'Port 8000 or 5173 is in use. Close the existing app/server before starting or updating Pixel Station.'
+}
 $uvPath = Join-Path $projectRoot '.tools\uv\uv.exe'
 if (-not (Test-Path -LiteralPath $uvPath)) {
     New-Item -ItemType Directory -Path '.tools' -Force | Out-Null
@@ -39,8 +43,10 @@ if ($Check) {
     try {
         & $pythonPath -m pytest -q
         if ($LASTEXITCODE -ne 0) { throw 'Backend tests failed.' }
-        & $pythonPath -m ruff check .
+        & $pythonPath -m ruff check . '..\scripts'
         if ($LASTEXITCODE -ne 0) { throw 'Backend lint failed.' }
+        & $pythonPath -m mypy --ignore-missing-imports --check-untyped-defs pixel_station
+        if ($LASTEXITCODE -ne 0) { throw 'Backend type checks failed.' }
     } finally { Pop-Location }
     Push-Location -LiteralPath 'frontend'
     try {
@@ -48,6 +54,8 @@ if ($Check) {
         if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed.' }
         & npm.cmd test -- --run
         if ($LASTEXITCODE -ne 0) { throw 'Frontend tests failed.' }
+        & npm.cmd run lint
+        if ($LASTEXITCODE -ne 0) { throw 'Frontend formatting checks failed.' }
     } finally { Pop-Location }
     exit 0
 }

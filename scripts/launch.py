@@ -31,26 +31,67 @@ def main() -> int:
     children: list[subprocess.Popen] = []
     streams = []
     environment = os.environ.copy()
-    environment.update(OLLAMA_NO_CLOUD="1", OLLAMA_MAX_LOADED_MODELS="1", OLLAMA_NUM_PARALLEL="1")
+    environment.update(
+        OLLAMA_NO_CLOUD="1",
+        OLLAMA_MAX_LOADED_MODELS="1",
+        OLLAMA_NUM_PARALLEL="1",
+        HF_HUB_DISABLE_TELEMETRY="1",
+        DO_NOT_TRACK="1",
+    )
 
     def start(name: str, command: list[str], cwd: Path) -> None:
         stream = (logs / f"{name}.log").open("a", encoding="utf-8")
         streams.append(stream)
-        options = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True}
-        children.append(subprocess.Popen(command, cwd=cwd, env=environment, stdout=stream, stderr=stream, **options))
+        options = (
+            {"creationflags": subprocess.CREATE_NO_WINDOW}
+            if os.name == "nt"
+            else {"start_new_session": True}
+        )
+        children.append(
+            subprocess.Popen(
+                command, cwd=cwd, env=environment, stdout=stream, stderr=stream, **options
+            )
+        )
 
     try:
         if port_open(8000) or port_open(5173):
-            print("Port 8000 or 5173 is already in use. Close the existing app/server before launching.")
+            print(
+                "Port 8000 or 5173 is already in use. Close the existing app/server before launching."
+            )
             return 1
         ollama = shutil.which("ollama")
         if ollama and not port_open(11434):
             start("ollama", [ollama, "serve"], ROOT)
-        start("backend", [sys.executable, "-m", "uvicorn", "pixel_station.app:app", "--host", "127.0.0.1", "--port", "8000"], ROOT / "backend")
+        start(
+            "backend",
+            [
+                sys.executable,
+                "-m",
+                "uvicorn",
+                "pixel_station.app:app",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8000",
+            ],
+            ROOT / "backend",
+        )
         node = shutil.which("node")
         if not node:
             raise RuntimeError("Node.js is missing. Install Node.js 22+ and restart your terminal.")
-        start("frontend", [node, str(ROOT / "frontend/node_modules/vite/bin/vite.js"), "--host", "127.0.0.1", "--port", "5173", "--strictPort"], ROOT / "frontend")
+        start(
+            "frontend",
+            [
+                node,
+                str(ROOT / "frontend/node_modules/vite/bin/vite.js"),
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "5173",
+                "--strictPort",
+            ],
+            ROOT / "frontend",
+        )
         deadline = time.monotonic() + 45
         while time.monotonic() < deadline:
             for process in children:
@@ -58,7 +99,9 @@ def main() -> int:
                     raise RuntimeError(f"A service stopped. Inspect logs in {logs}")
             if port_open(8000) and port_open(5173):
                 try:
-                    with urllib.request.urlopen("http://127.0.0.1:8000/api/health", timeout=2) as response:
+                    with urllib.request.urlopen(
+                        "http://127.0.0.1:8000/api/health", timeout=2
+                    ) as response:
                         if response.status == 200:
                             break
                 except OSError:
@@ -83,7 +126,12 @@ def main() -> int:
         for process in reversed(children):
             if process.poll() is None:
                 if os.name == "nt":
-                    subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                    subprocess.run(
+                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
                 else:
                     os.killpg(process.pid, signal.SIGTERM)
         for stream in streams:
