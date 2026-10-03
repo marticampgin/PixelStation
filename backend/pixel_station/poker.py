@@ -6,15 +6,20 @@ import json
 import random
 import time
 from collections import Counter, defaultdict
+from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from typing import Literal
 
 import httpx
+from anyio import CancelScope
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import JSON, ForeignKey, select
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .database import Base, FrictionEvent, new_id, now
+from .observability import provider_observations
 
 RANKS = "23456789TJQKA"
 SUITS = "shdc"
@@ -31,6 +36,38 @@ HAND_NAMES = (
 )
 BOT_TIME_BUDGET = 45
 BOT_MAX_MODEL_ACTIONS = 64
+
+
+def record_event(state: dict, action: str, seat: int | None = None, amount: int = 0) -> None:
+    """Persist public facts only, with a stable sequence across all hands."""
+    state["event_sequence"] = state.get("event_sequence", 0) + 1
+    state.setdefault("event_log", []).append(
+        {
+            "sequence": state["event_sequence"],
+            "created_at": now(),
+            "hand_number": state["hand_number"],
+            "stage": state["stage"],
+            "seat": seat,
+            "action": action,
+            "amount": amount,
+            "pot": sum(player["contribution"] for player in state["seats"]),
+        }
+    )
+
+
+def settlement_needed(state: dict) -> bool:
+    if state["completed"]:
+        return False
+    live = [seat for seat in state["seats"] if not seat["folded"]]
+    actionable = [seat for seat in live if not seat["all_in"]]
+    return (
+        len(live) <= 1
+        or not state["pending"]
+        or (
+            len(actionable) <= 1
+            and (not actionable or actionable[0]["bet"] >= state["current_bet"])
+        )
+    )
 
 
 def evaluate_five(cards: list[str]) -> tuple[int, ...]:
@@ -117,6 +154,8 @@ def new_game(
         "hand_number": 0,
         "initial_chips": seats * stack,
         "completed": True,
+        "event_sequence": 0,
+        "event_log": [],
     }
     next_hand(state, rng)
     return state
@@ -153,7 +192,9 @@ def next_hand(state: dict, rng=None) -> None:
     sb = state["dealer"] if len(active) == 2 else next_seat(state, state["dealer"], active)
     bb = next_seat(state, sb, active)
     pay(state, sb, state["small_blind"])
+    record_event(state, "small_blind", sb, state["seats"][sb]["bet"])
     pay(state, bb, state["big_blind"])
+    record_event(state, "big_blind", bb, state["seats"][bb]["bet"])
     state["history"] = [
         {
             "seat": sb,
@@ -237,10 +278,11 @@ def finish(state: dict) -> None:
         for index, amount in awards.items()
     ]
     state.update(completed=True, actor=None, pending=[])
+    record_event(state, state["stage"])
     assert sum(seat["stack"] for seat in state["seats"]) == state["initial_chips"]
 
 
-def settle_round(state: dict) -> None:
+def settle_round(state: dict, *, one_stage: bool = False) -> None:
     while not state["completed"]:
         live = [seat for seat in state["seats"] if not seat["folded"]]
         if len(live) == 1:
@@ -270,9 +312,12 @@ def settle_round(state: dict) -> None:
         state["actor"] = (
             next_seat(state, state["dealer"], state["pending"]) if state["pending"] else None
         )
+        record_event(state, "deal")
+        if one_stage:
+            return
 
 
-def act(state: dict, action: str, amount: int | None = None) -> None:
+def act(state: dict, action: str, amount: int | None = None, *, settle: bool = True) -> None:
     available = {item["action"]: item for item in legal_actions(state)}
     if action not in available:
         raise ValueError("Action is not legal in the current state")
@@ -321,11 +366,13 @@ def act(state: dict, action: str, amount: int | None = None) -> None:
     state["history"].append(
         {"seat": seat, "action": action, "amount": paid, "stage": state["stage"]}
     )
+    record_event(state, action, seat, paid)
     if state["pending"]:
         state["actor"] = next_seat(state, seat, state["pending"])
     else:
         state["actor"] = None
-    settle_round(state)
+    if settle:
+        settle_round(state)
 
 
 def public_view(state: dict, viewer: int = 0) -> dict:
@@ -354,8 +401,19 @@ def public_view(state: dict, viewer: int = 0) -> dict:
         }
         for seat in state["seats"]
     ]
-    result["legal_actions"] = legal_actions(state) if state["actor"] == viewer else []
-    return result
+    result["legal_actions"] = (
+        legal_actions(state) if state["actor"] == viewer and not settlement_needed(state) else []
+    )
+    result["event_sequence"] = state.get("event_sequence", 0)
+    result["event_log"] = state.get("event_log", [])
+    result["needs_step"] = not state["completed"] and (
+        state["actor"] != 0 or settlement_needed(state)
+    )
+    result["phase"] = (
+        "complete" if state["completed"] else "waiting" if result["needs_step"] else "ready"
+    )
+    # Queued stream events must remain snapshots when the engine mutates later.
+    return deepcopy(result)
 
 
 class GameSession(Base):
@@ -391,18 +449,37 @@ class TableRequest(BaseModel):
 class ActionRequest(BaseModel):
     action: Literal["fold", "check", "call", "raise", "all_in"]
     amount: int | None = Field(default=None, ge=1)
+    expected_sequence: int | None = Field(default=None, ge=0)
+
+
+class StepRequest(BaseModel):
+    expected_sequence: int = Field(ge=0)
 
 
 class BotChoice(ActionRequest):
     reason_short: str = Field(default="", max_length=300)
 
 
-async def run_bots(request: Request, state: dict) -> list[str]:
+async def run_bots(
+    request: Request,
+    state: dict,
+    *,
+    max_actions: int | None = None,
+    defer_settle: bool = False,
+    on_phase: Callable[[str, int], Awaitable[None]] | None = None,
+) -> list[str]:
+    from .harness import record_observation
+
     errors: list[str] = []
-    deadline = time.monotonic() + BOT_TIME_BUDGET
+    phase_started = time.monotonic()
+    deadline = phase_started + max(0, BOT_TIME_BUDGET - state.get("opponent_compute_seconds", 0))
 
     async def infer(model: str, actor: int, settings, attempt: int) -> BotChoice:
+        if on_phase:
+            await on_phase("queued", actor)
         async with request.app.state.model_queue.lock:
+            if on_phase:
+                await on_phase("choosing", actor)
             return await request.app.state.llm.structured(
                 model,
                 [
@@ -412,7 +489,13 @@ async def run_bots(request: Request, state: dict) -> list[str]:
                     },
                     {
                         "role": "user",
-                        "content": json.dumps(public_view(state, actor))
+                        "content": json.dumps(
+                            {
+                                key: value
+                                for key, value in public_view(state, actor).items()
+                                if key not in {"event_log", "event_sequence", "phase", "needs_step"}
+                            }
+                        )
                         + (
                             "\nPrevious action failed validation. Select a legal option."
                             if attempt
@@ -433,45 +516,119 @@ async def run_bots(request: Request, state: dict) -> list[str]:
         actor = state.get("actor")
         if state["completed"] or actor in {None, 0}:
             return errors
-        options = legal_actions(state)
-        choice = None
-        settings = request.app.state.settings()
-        model = settings.roles.get("primary_chat", "")
-        for attempt in range(2):
-            if not model or time.monotonic() >= deadline or step >= BOT_MAX_MODEL_ACTIONS:
-                break
-            try:
-                validated_choice: BotChoice = await asyncio.wait_for(
-                    infer(model, actor, settings, attempt),
-                    timeout=min(15, max(0.1, deadline - time.monotonic())),
+        observations: list[dict] = []
+        metrics_scope = provider_observations.set(observations)
+        try:
+            options = legal_actions(state)
+            decision_started = time.monotonic()
+            repairs = 0
+            choice = None
+            settings = request.app.state.settings()
+            model = settings.roles.get("primary_chat", "")
+            for attempt in range(2):
+                if (
+                    not model
+                    or time.monotonic() >= deadline
+                    or (state.get("opponent_action_count", 0) + step >= BOT_MAX_MODEL_ACTIONS)
+                ):
+                    break
+                try:
+                    repairs += int(attempt > 0)
+                    validated_choice: BotChoice = await asyncio.wait_for(
+                        infer(model, actor, settings, attempt),
+                        timeout=min(15, max(0.1, deadline - time.monotonic())),
+                    )
+                    act(
+                        state,
+                        validated_choice.action,
+                        validated_choice.amount,
+                        settle=not defer_settle,
+                    )
+                    choice = validated_choice
+                    break
+                except asyncio.CancelledError:
+                    record_observation(
+                        request.app,
+                        route="poker_bot",
+                        model=model or None,
+                        status="interrupted",
+                        latency_ms=int((time.monotonic() - decision_started) * 1000),
+                        metrics={
+                            "repair_count": repairs,
+                            "fallback_count": 0,
+                            "bot_actions": 0,
+                            "provider_calls": observations,
+                        },
+                    )
+                    raise
+                except (TimeoutError, ValueError, RuntimeError, httpx.HTTPError) as error:
+                    errors.append(f"Invalid or unavailable poker model action: {str(error)[:200]}")
+                    choice = None
+            if choice is None:
+                legal = {option["action"] for option in options}
+                act(
+                    state,
+                    "check" if "check" in legal else "call" if "call" in legal else "fold",
+                    settle=not defer_settle,
                 )
-                act(state, validated_choice.action, validated_choice.amount)
-                choice = validated_choice
-                break
-            except (TimeoutError, ValueError, RuntimeError, httpx.HTTPError) as error:
-                errors.append(f"Invalid or unavailable poker model action: {str(error)[:200]}")
-                choice = None
-        if choice is None:
-            legal = {option["action"] for option in options}
-            act(state, "check" if "check" in legal else "call" if "call" in legal else "fold")
-            state["model_status"] = (
-                "Some opponents used legal fallback actions because local inference was unavailable or exceeded its budget."
+                state["model_status"] = (
+                    "Some opponents used legal fallback actions because local inference was unavailable or exceeded its budget."
+                )
+            record_observation(
+                request.app,
+                route="poker_bot",
+                model=model or None,
+                status="complete",
+                latency_ms=int((time.monotonic() - decision_started) * 1000),
+                metrics={
+                    "repair_count": repairs,
+                    "fallback_count": int(choice is None),
+                    "bot_actions": 1,
+                    "provider_calls": observations,
+                },
             )
+            if max_actions is not None and step + 1 >= max_actions:
+                state["opponent_action_count"] = state.get("opponent_action_count", 0) + step + 1
+                state["opponent_compute_seconds"] = state.get("opponent_compute_seconds", 0) + (
+                    time.monotonic() - phase_started
+                )
+                return errors
+        finally:
+            provider_observations.reset(metrics_scope)
     raise RuntimeError("Poker action budget exceeded")
 
 
 def create_poker_router() -> APIRouter:
     router = APIRouter(prefix="/api/poker", tags=["poker"])
     locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+    phases: dict[str, str] = {}
+
+    def check_sequence(state: dict, expected: int | None, *, required: bool = False) -> None:
+        if required and expected is None:
+            raise HTTPException(
+                422, "Reload the table before acting: expected_sequence is required"
+            )
+        if expected is not None and expected != state.get("event_sequence", 0):
+            raise HTTPException(409, "This turn has already changed. Reload the saved table")
+
+    def start_opponent_phase(state: dict) -> None:
+        state["opponent_action_count"] = 0
+        state["opponent_compute_seconds"] = 0
+
+    def check_idle(identity: str) -> None:
+        if locks[identity].locked():
+            raise HTTPException(
+                409, "Another action is in progress at this table. Resume the saved turn"
+            )
 
     def save(request: Request, state: dict, errors: list[str]) -> None:
         with request.app.state.database.session() as session:
             record = session.get(GameSession, state["id"])
             if record is None:
-                record = GameSession(id=state["id"], state=state)
+                record = GameSession(id=state["id"], state=deepcopy(state))
                 session.add(record)
             else:
-                record.state = state
+                record.state = deepcopy(state)
                 record.updated_at = now()
             known = list(
                 session.scalars(
@@ -518,10 +675,11 @@ def create_poker_router() -> APIRouter:
             ]
 
     @router.post("/sessions")
-    async def create(body: TableRequest, request: Request):
+    async def create(body: TableRequest, request: Request, progressive: bool = False):
         try:
             state = new_game(**body.model_dump())
-            errors = await run_bots(request, state)
+            start_opponent_phase(state)
+            errors = [] if progressive else await run_bots(request, state)
             save(request, state, errors)
             return public_view(state)
         except ValueError as error:
@@ -529,32 +687,120 @@ def create_poker_router() -> APIRouter:
 
     @router.get("/sessions/{identity}")
     def get(identity: str, request: Request):
-        return public_view(load(request, identity))
+        view = public_view(load(request, identity))
+        if identity in phases:
+            view["phase"] = phases[identity]
+        return view
 
     @router.post("/sessions/{identity}/actions")
-    async def action(identity: str, body: ActionRequest, request: Request):
+    async def action(
+        identity: str, body: ActionRequest, request: Request, progressive: bool = False
+    ):
+        check_idle(identity)
         async with locks[identity]:
             state = load(request, identity)
-            if state["actor"] != 0:
+            check_sequence(state, body.expected_sequence, required=progressive)
+            if state["actor"] != 0 or settlement_needed(state):
                 raise HTTPException(409, "It is not your turn")
             try:
-                act(state, body.action, body.amount)
-                errors = await run_bots(request, state)
+                act(state, body.action, body.amount, settle=not progressive)
+                start_opponent_phase(state)
+                errors = [] if progressive else await run_bots(request, state)
                 save(request, state, errors)
                 return public_view(state)
             except ValueError as error:
                 raise HTTPException(422, str(error)) from error
 
     @router.post("/sessions/{identity}/next-hand")
-    async def advance(identity: str, request: Request):
+    async def advance(
+        identity: str,
+        request: Request,
+        progressive: bool = False,
+        expected_sequence: int | None = None,
+    ):
+        check_idle(identity)
         async with locks[identity]:
             state = load(request, identity)
+            check_sequence(state, expected_sequence, required=progressive)
             try:
                 next_hand(state)
-                errors = await run_bots(request, state)
+                start_opponent_phase(state)
+                errors = [] if progressive else await run_bots(request, state)
                 save(request, state, errors)
                 return public_view(state)
             except ValueError as error:
                 raise HTTPException(422, str(error)) from error
+
+    @router.post("/sessions/{identity}/steps")
+    async def step(identity: str, body: StepRequest, request: Request):
+        """One actual opponent action or one street, never a buffered future hand."""
+        check_idle(identity)
+        lock = locks[identity]
+        await lock.acquire()
+        try:
+            state = load(request, identity)
+            check_sequence(state, body.expected_sequence)
+            if not public_view(state)["needs_step"]:
+                raise HTTPException(409, "No opponent action is pending")
+        except BaseException:
+            lock.release()
+            raise
+
+        async def events():
+            queue: asyncio.Queue[dict | None] = asyncio.Queue()
+
+            async def phase(value: str, actor: int) -> None:
+                phases[identity] = value
+                view = public_view(state)
+                view["phase"] = value
+                await queue.put({"type": "phase", "phase": value, "actor": actor, "state": view})
+
+            async def produce() -> None:
+                try:
+                    if settlement_needed(state):
+                        settle_round(state, one_stage=True)
+                        errors = []
+                    else:
+                        errors = await run_bots(
+                            request, state, max_actions=1, defer_settle=True, on_phase=phase
+                        )
+                    save(request, state, errors)
+                    await queue.put({"type": "state", "state": public_view(state)})
+                    await queue.put({"type": "done"})
+                except asyncio.CancelledError:
+                    # No mutation occurs during inference. Previously committed steps survive.
+                    raise
+                except Exception:
+                    await queue.put(
+                        {
+                            "type": "error",
+                            "error": "This turn could not finish. Resume the saved table",
+                        }
+                    )
+                finally:
+                    await queue.put(None)
+
+            task = asyncio.create_task(produce())
+            try:
+                while True:
+                    event = await queue.get()
+                    if event is None:
+                        break
+                    yield json.dumps(event) + "\n"
+            finally:
+                task.cancel()
+                try:
+                    # StreamingResponse's disconnect cancel scope must not skip lock cleanup.
+                    with CancelScope(shield=True):
+                        await asyncio.gather(task, return_exceptions=True)
+                finally:
+                    phases.pop(identity, None)
+                    lock.release()
+
+        return StreamingResponse(
+            events(),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
 
     return router

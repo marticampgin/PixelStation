@@ -39,7 +39,7 @@ it('clamps a raise after bots change its legal range in the same turn and retain
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL) => {
-      if (String(input).endsWith('/actions')) phase += 1;
+      if (String(input).includes('/actions?')) phase += 1;
       return new Response(JSON.stringify(state()), {
         headers: { 'Content-Type': 'application/json' },
       });
@@ -118,13 +118,13 @@ it.each([
     render(<PokerView />);
     await user.click(screen.getByRole('button', { name: /Poker No-Limit/ }));
     await user.click(screen.getByRole('button', { name: 'Start table' }));
-    await screen.findByText('Hand complete');
+    await screen.findAllByText('Hand complete');
     if (canAdvance) {
       expect(screen.getByRole('button', { name: 'Next hand' })).toBeEnabled();
       await user.click(screen.getByRole('button', { name: 'Next hand' }));
       await waitFor(() =>
         expect(fetcher).toHaveBeenCalledWith(
-          '/api/poker/sessions/completed-table/next-hand',
+          '/api/poker/sessions/completed-table/next-hand?progressive=true&expected_sequence=0',
           expect.objectContaining({ method: 'POST' }),
         ),
       );

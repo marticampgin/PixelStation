@@ -128,6 +128,7 @@ describe('workstation interactions', () => {
     expect(screen.getByRole('complementary', { name: 'Context panel' })).toBeInTheDocument();
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('complementary', { name: 'Context panel' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Expand context panel' })).toHaveFocus();
 
     await user.click(screen.getByRole('button', { name: 'Expand sidebar' }));
     await user.click(screen.getByRole('button', { name: 'Memory' }));
@@ -429,8 +430,8 @@ describe('workstation interactions', () => {
       completed: false,
     };
     mockApi((path, init) => {
-      if (path === '/api/poker/sessions') return json(state);
-      if (path === '/api/poker/sessions/poker-one/actions') {
+      if (path === '/api/poker/sessions?progressive=true') return json(state);
+      if (path === '/api/poker/sessions/poker-one/actions?progressive=true') {
         submitted = JSON.parse(String(init?.body));
         return json({ ...state, completed: true, legal_actions: [] });
       }
@@ -443,7 +444,7 @@ describe('workstation interactions', () => {
     await user.click(screen.getByRole('button', { name: /Poker No-Limit/ }));
     await user.click(screen.getByRole('button', { name: 'Start table' }));
     await user.click(await screen.findByRole('button', { name: 'Call 5' }));
-    await waitFor(() => expect(submitted).toEqual({ action: 'call' }));
+    await waitFor(() => expect(submitted).toEqual({ action: 'call', expected_sequence: 0 }));
     expect(await screen.findByRole('button', { name: 'Next hand' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Raise' })).not.toBeInTheDocument();
   });
