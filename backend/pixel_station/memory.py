@@ -327,20 +327,6 @@ async def _compact_locked(app, conversation_id: str) -> None:
                 ],
                 SummaryOutput,
             )
-            extraction = None
-            if settings.auto_memory:
-                extraction_model = settings.roles["memory_extractor"] or model
-                extraction = await app.state.llm.structured(
-                    extraction_model,
-                    [
-                        {
-                            "role": "system",
-                            "content": "Extract only explicitly stated stable user preferences, facts, projects, or events. No guesses, no assistant claims, no private email content. Skip trivial exchanges. Set should_store=false when uncertain. Set source_message_id to the actual user message ID in brackets that supports this memory, or null if unclear. Leave source_conversation_id null; the application assigns it.",
-                        },
-                        {"role": "user", "content": extraction_transcript},
-                    ],
-                    ExtractionOutput,
-                )
         with app.state.database.session() as session:
             conversation = session.get(Conversation, conversation_id)
             if not conversation:
@@ -353,15 +339,6 @@ async def _compact_locked(app, conversation_id: str) -> None:
             job.last_run = now()
             job.next_run = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
             session.commit()
-            if extraction:
-                for candidate in extraction.candidates:
-                    if candidate.should_store and candidate.confidence >= 0.75:
-                        data = candidate.model_dump(exclude={"should_store"})
-                        user_ids = {row.id for row in batch if row.role == "user"}
-                        data["source_conversation_id"] = conversation_id
-                        if data.get("source_message_id") not in user_ids:
-                            data["source_message_id"] = None
-                        create_memory(session, MemoryInput(**data))
     except Exception as exc:
         with app.state.database.session() as session:
             session.add(FrictionEvent(kind="memory_compaction_error", details=str(exc)[:1000]))
@@ -370,6 +347,42 @@ async def _compact_locked(app, conversation_id: str) -> None:
                 job = ScheduledJob(id=f"summary:{conversation_id}", next_run=now())
                 session.add(job)
             job.next_run = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+            session.commit()
+        return
+    if not settings.auto_memory:
+        return
+    try:
+        async with asyncio.timeout(180), app.state.model_queue.lock:
+            extraction = await app.state.llm.structured(
+                settings.roles["memory_extractor"] or model,
+                [
+                    {
+                        "role": "system",
+                        "content": "Extract only explicitly stated stable user preferences, facts, projects, or events. No guesses, no assistant claims, no private email content. Skip trivial exchanges. Set should_store=false when uncertain. Set source_message_id to the actual user message ID in brackets that supports this memory, or null if unclear. Leave source_conversation_id null; the application assigns it.",
+                    },
+                    {"role": "user", "content": extraction_transcript},
+                ],
+                ExtractionOutput,
+            )
+        with app.state.database.session() as session:
+            if not session.get(Conversation, conversation_id):
+                return
+            user_ids = {row.id for row in batch if row.role == "user"}
+            for candidate in extraction.candidates:
+                if candidate.should_store and candidate.confidence >= 0.75:
+                    data = candidate.model_dump(exclude={"should_store"})
+                    data["source_conversation_id"] = conversation_id
+                    if data.get("source_message_id") not in user_ids:
+                        data["source_message_id"] = None
+                    create_memory(session, MemoryInput(**data))
+    except Exception as exc:
+        with app.state.database.session() as session:
+            session.add(
+                FrictionEvent(
+                    kind="memory_extraction_error",
+                    details=f"Conversation {conversation_id}, summary covers {count} messages: {str(exc)[:800]}",
+                )
+            )
             session.commit()
 
 

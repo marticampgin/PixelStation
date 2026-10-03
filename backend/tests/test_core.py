@@ -958,6 +958,59 @@ async def test_compaction_serializes_per_conversation_and_rechecks_state(app):
         assert session.get(Conversation, cid).summary == "Original context retained"
 
 
+async def test_successful_summary_is_saved_before_extraction_failure(app):
+    from pixel_station.database import Conversation, FrictionEvent, Memory, ScheduledJob
+    from pixel_station.memory import compact_conversation
+
+    settings = app.state.settings()
+    settings.roles["primary_chat"] = "local-test:latest"
+    settings.summary_turns = 2
+    app.state.set_settings(settings)
+    with app.state.database.session() as session:
+        conversation = Conversation()
+        session.add(conversation)
+        session.flush()
+        cid = conversation.id
+        for index in range(2):
+            session.add(Message(conversation_id=cid, role="user", content=f"My project {index}"))
+            session.add(
+                Message(conversation_id=cid, role="assistant", content="PRIVATE EMAIL EVIDENCE")
+            )
+        session.commit()
+    calls = []
+
+    async def structured(model, messages, schema, **kwargs):
+        calls.append(schema.__name__)
+        if schema.__name__ == "SummaryOutput":
+            return schema(summary="Durable project context")
+        with app.state.database.session() as session:
+            saved = session.get(Conversation, cid)
+            assert saved.summary == "Durable project context"
+            assert saved.summary_message_count == 4
+        assert "PRIVATE EMAIL EVIDENCE" not in messages[-1]["content"]
+        raise RuntimeError("Extraction model unavailable")
+
+    app.state.llm.structured = structured
+    await compact_conversation(app, cid)
+    await compact_conversation(app, cid)
+    assert calls == ["SummaryOutput", "ExtractionOutput"]
+    with app.state.database.session() as session:
+        saved = session.get(Conversation, cid)
+        assert saved.summary == "Durable project context"
+        assert saved.summary_message_count == 4
+        assert session.scalar(select(Memory)) is None
+        errors = list(session.scalars(select(FrictionEvent)))
+        assert [error.kind for error in errors] == ["memory_extraction_error"]
+        assert "Extraction model unavailable" in errors[0].details
+        # Extraction failure preserves the summary's normal success cadence, not its hour backoff.
+        job = session.get(ScheduledJob, f"summary:{cid}")
+        from datetime import datetime
+
+        assert (
+            datetime.fromisoformat(job.next_run) - datetime.fromisoformat(job.last_run)
+        ).total_seconds() < 60
+
+
 def test_restart_preserves_chat_memory_and_settings(tmp_path):
     first = create_app(tmp_path, llm=FakeLLM())
     with TestClient(first) as client:
