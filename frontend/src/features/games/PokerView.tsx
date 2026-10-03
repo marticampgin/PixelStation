@@ -32,6 +32,14 @@ export function PokerView() {
   const [amount, setAmount] = useState(20);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const legalRaise = state?.legal_actions.find((action) => action.action === 'raise');
+  const raiseMin = legalRaise?.min;
+  const raiseMax = legalRaise?.max;
+  const tableComplete = Boolean(
+    state?.completed &&
+    (!state.seats.some((seat) => seat.index === 0 && seat.stack > 0) ||
+      state.seats.filter((seat) => seat.stack > 0).length < 2),
+  );
   useEffect(() => {
     if (sessionId)
       request<PokerState>(`/poker/sessions/${sessionId}`)
@@ -42,9 +50,9 @@ export function PokerView() {
         });
   }, [sessionId]);
   useEffect(() => {
-    const legalRaise = state?.legal_actions.find((action) => action.action === 'raise');
-    if (legalRaise?.min) setAmount(legalRaise.min);
-  }, [state?.hand_number, state?.actor, state?.stage]);
+    if (raiseMin === undefined) return;
+    setAmount((previous) => Math.min(raiseMax ?? Infinity, Math.max(raiseMin, previous)));
+  }, [raiseMin, raiseMax]);
   async function action(run: () => Promise<PokerState>) {
     setBusy(true);
     setError('');
@@ -98,6 +106,7 @@ export function PokerView() {
           onClick={() => {
             setState(null);
             setSessionId(null);
+            setError('');
           }}
         >
           <Plus size={15} />
@@ -230,7 +239,12 @@ export function PokerView() {
                     </label>
                     <button
                       className="button"
-                      disabled={amount < (legal.min ?? 0) || amount > (legal.max ?? Infinity)}
+                      disabled={
+                        !Number.isFinite(amount) ||
+                        !Number.isInteger(amount) ||
+                        amount < (legal.min ?? 0) ||
+                        amount > (legal.max ?? Infinity)
+                      }
                       onClick={() =>
                         void action(() =>
                           post<PokerState>(`/poker/sessions/${state.id}/actions`, {
@@ -262,7 +276,7 @@ export function PokerView() {
                   </button>
                 ),
               )}
-              {state.completed ? (
+              {state.completed && !tableComplete ? (
                 <button
                   className="button"
                   onClick={() =>
@@ -280,6 +294,9 @@ export function PokerView() {
                 ? `Hand complete · ${state.winners.map((winner) => (state.seats[winner.seat]?.name ?? 'Player') + ' receives ' + winner.amount + ' chips (' + winner.hand + ')').join(' · ')}`
                 : 'Hand complete'}
             </div>
+          ) : null}
+          {tableComplete ? (
+            <p className="subtle">Table complete. Use New table to play again.</p>
           ) : null}
           {state.model_status ? (
             <p className="subtle poker-model-status">{state.model_status}</p>
