@@ -27,6 +27,8 @@ def create_app(data_dir: Path | None = None, llm=None, discover: bool = True) ->
             return AppSettings.model_validate(row.value) if row else active_settings
 
     def set_settings(settings: AppSettings) -> None:
+        if getattr(app.state, "native_evaluation", False):
+            raise HTTPException(409, "Settings are locked during the manual native evaluation")
         with database.session() as session:
             row = session.get(Setting, "application")
             if row and any(
@@ -159,8 +161,11 @@ def create_app(data_dir: Path | None = None, llm=None, discover: bool = True) ->
     app.state.generation_tasks = {}
     app.state.background_tasks = set()
     app.state.compaction_locks = {}
+    app.state.evaluation_task = None
+    app.state.native_evaluation = False
     # Migrate before optional providers read settings; repeated Alembic upgrades are idempotent.
     database.migrate()
+    harness.recover_evaluations(app)
     app.state.integration_services = IntegrationServices(
         app.state.data_dir, get_setting, set_setting
     )

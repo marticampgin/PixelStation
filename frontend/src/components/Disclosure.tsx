@@ -55,7 +55,7 @@ export function Disclosure({
   children,
   initiallyOpen = true,
 }: {
-  title: string;
+  title: ReactNode;
   preference: string;
   children: ReactNode;
   initiallyOpen?: boolean;

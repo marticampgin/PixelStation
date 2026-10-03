@@ -33,6 +33,8 @@ class AppSettings(BaseModel):
     profile: Literal["lite", "balanced", "strong"] = "lite"
     harness_enabled: bool = True
     harness_interval_hours: int = Field(default=24, ge=1, le=168)
+    harness_window_days: int = Field(default=7, ge=1, le=90)
+    harness_sample_limit: int = Field(default=1000, ge=100, le=5000)
     time_zone: str = "Europe/Riga"
 
     @field_validator("time_zone")

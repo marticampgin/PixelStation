@@ -1,0 +1,17 @@
+{
+  "version": "pixel-station-critical-v1",
+  "routes": [
+    {"input": "Explain photosynthesis briefly", "expected": "normal_chat"},
+    {"input": "Create a CSV file named fixture.csv", "expected": "file_create"},
+    {"input": "Draft a three-step plan for organizing a local project folder", "expected": "normal_chat"},
+    {"input": "Find Alice's emails from last week", "expected": "gmail_search"},
+    {"input": "Read my email", "expected": "gmail_read"},
+    {"input": "Delete email from Alice", "expected": "system_help"},
+    {"input": "Generate an image of a tree", "expected": "image_generate"}
+  ],
+  "artifact": {"names": ["fixture-first.csv", "fixture-second.csv"], "content": "task,status\nlocal chat,verified\nPoker,verified"},
+  "memory": {"text": "I prefer quiet workspaces", "query": "quiet workspaces"},
+  "plan": {"prompt": "Draft a three-step plan for organizing a local project folder. Keep each step under 15 words. Return only three numbered steps.", "steps": 3, "max_words_exclusive": 15, "historical_filename": "fixture-first.csv"},
+  "file_qa": {"filename": "fixture-notes.txt", "text": "The verification code is violet-42.", "prompt": "What is the verification code in the supplied notes? Answer briefly.", "expected": "violet-42"},
+  "poker_seed": 17
+}

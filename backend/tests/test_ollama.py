@@ -7,6 +7,7 @@ import pytest
 from pydantic import BaseModel
 
 from pixel_station.config import AppSettings
+from pixel_station.observability import provider_observations
 from pixel_station.providers import OllamaError, OllamaProvider
 
 
@@ -28,12 +29,14 @@ def ollama(monkeypatch):
                 200,
                 json={
                     "models": [
-                        {"name": "local:latest", "size": 100},
+                        {"name": "local:latest", "size": 100, "digest": "1" * 64},
                         {"name": "remote:latest"},
                         {"name": "hosted-cloud:latest"},
                     ]
                 },
             )
+        if request.url.path == "/api/version":
+            return httpx.Response(200, json={"version": "0.test"})
         if request.url.path == "/api/show":
             return httpx.Response(
                 200,
@@ -78,6 +81,7 @@ async def test_local_discovery_and_stream_discard_reasoning(ollama):
     provider, requests = ollama
     models = await provider.models()
     assert [model["name"] for model in models["models"]] == ["local:latest"]
+    assert models["models"][0]["digest"] == "1" * 64
     response = "".join(
         [
             token
@@ -131,11 +135,28 @@ async def test_native_embedding_api(ollama):
     )
 
 
+async def test_native_probe_records_fresh_model_digest_and_runtime_from_local_api(ollama, tmp_path):
+    from pixel_station.app import create_app
+    from pixel_station.evaluations import known_native_identity, native_cases
+
+    provider, requests = ollama
+    app = create_app(tmp_path, llm=provider, discover=False)
+    settings = provider.get_settings()
+    cases = await native_cases(app, settings)
+    assert len(cases) == 2
+    for case in cases:
+        assert case["runtime"]["digest"] == "1" * 64
+        assert case["runtime"]["ollama"] == "0.test"
+        assert known_native_identity(case["runtime"])
+    assert any(path == "/api/version" for path, _ in requests)
+    assert any(path == "/api/tags" for path, _ in requests)
+
+
 @pytest.fixture
 def content_ollama(monkeypatch):
     original_client = httpx.AsyncClient
 
-    def create(*, chunks=None, structured_content="", wire_stream=None):
+    def create(*, chunks=None, structured_content="", wire_stream=None, terminal=None):
         requests = []
 
         def handle(request):
@@ -157,7 +178,8 @@ def content_ollama(monkeypatch):
                         )
                         for content in chunks
                     )
-                    + "\n",
+                    + "\n"
+                    + (json.dumps({"done": True, **terminal}) + "\n" if terminal else ""),
                 )
             return httpx.Response(
                 200,
@@ -187,6 +209,34 @@ def content_ollama(monkeypatch):
         return provider, requests
 
     return create
+
+
+async def test_provider_records_actual_terminal_metadata_without_content(content_ollama):
+    provider, _ = content_ollama(
+        chunks=["<think>private thought</think>Public"],
+        terminal={
+            "prompt_eval_count": 20,
+            "eval_count": 12,
+            "load_duration": 10_000_000,
+            "total_duration": 610_000_000,
+            "eval_duration": 600_000_000,
+            "done_reason": "stop",
+        },
+    )
+    observations = []
+    scope = provider_observations.set(observations)
+    try:
+        answer = "".join([part async for part in provider.stream("local:latest", [])])
+    finally:
+        provider_observations.reset(scope)
+    assert answer == "Public"
+    assert len(observations) == 1
+    assert observations[0]["prompt_eval_count"] == 20
+    assert observations[0]["eval_count"] == 12
+    assert observations[0]["tokens_per_second"] == 20
+    assert observations[0]["result_status"] == "complete"
+    assert observations[0]["done_reason"] == "stop"
+    assert "private" not in json.dumps(observations)
 
 
 @pytest.mark.parametrize("tag", ["think", "thinking", "reasoning", "analysis"])

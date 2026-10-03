@@ -28,6 +28,7 @@ from .files import IMAGE_EXTENSIONS, FileCreate, retrieve_files, write_generated
 from .google_tools import google_chat_action
 from .indexing import embed_query
 from .memory import MemoryInput, compact_conversation, create_memory, search_memory
+from .observability import provider_observations, run_metrics
 from .orchestration import Plan, Route, classify_ambiguous, route_prompt
 from .providers import UnsupportedToolCall
 from .research import run_research, validate_research_plan
@@ -155,8 +156,8 @@ def validated_citations(content: str, sources: list[dict]) -> tuple[str, list[st
     return re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", replace, content), removed
 
 
-async def stream_with_cancel(provider, model, messages, cancel_event):
-    iterator = provider.stream(model, messages).__aiter__()
+async def stream_with_cancel(provider, model, messages, cancel_event, stream_kwargs=None):
+    iterator = provider.stream(model, messages, **(stream_kwargs or {})).__aiter__()
     try:
         while True:
             token_task = asyncio.create_task(anext(iterator))
@@ -281,14 +282,18 @@ def repair_answer_context(settings, context: list[dict]) -> list[dict]:
     return [*systems, *reversed(history), latest]
 
 
-async def answer_stream(app, model, context, cancel_event, traces):
+async def answer_stream(
+    app, model, context, cancel_event, traces, *, stream_kwargs=None, settings=None
+):
     """Validate throughout genuine streaming and replace a rejected attempt once."""
 
     for attempt in range(2):
+        if stream_kwargs is not None:
+            traces.append({"answer_attempt": attempt + 1})
         content = ""
         emitted = 0
         unsupported = False
-        stream = stream_with_cancel(app.state.llm, model, context, cancel_event)
+        stream = stream_with_cancel(app.state.llm, model, context, cancel_event, stream_kwargs)
         try:
             async for token in stream:
                 content += token
@@ -318,7 +323,7 @@ async def answer_stream(app, model, context, cancel_event, traces):
             raise RuntimeError(
                 "The local model returned a tool call instead of an answer after one retry. Try another model or ask a more specific question about the supplied excerpt."
             )
-        context = repair_answer_context(app.state.settings(), context)
+        context = repair_answer_context(settings or app.state.settings(), context)
 
 
 async def generate_response(
@@ -335,10 +340,16 @@ async def generate_response(
     result_content = ""
     final_status = "interrupted"
     traces: list[dict] = [{"route": route.model_dump()}]
+    measurements: list[dict] = []
+    first_token_ms = None
+    tool_attempts = 0
+    query_vector = None
+    retrieval_completed = False
     cancel_event = asyncio.Event()
     if conversation_id in app.state.active_generations:
         yield ndjson({"type": "error", "error": "This chat already has an active response"})
         return
+    measurement_scope = provider_observations.set(measurements)
     app.state.active_generations[conversation_id] = cancel_event
     app.state.generation_tasks[conversation_id] = asyncio.current_task()
     try:
@@ -444,6 +455,7 @@ async def generate_response(
             file_context = retrieve_files(
                 session, active_ids, payload.content, embedding=query_vector
             )
+            retrieval_completed = True
             files = (
                 list(session.scalars(select(Attachment).where(Attachment.id.in_(active_ids))))
                 if active_ids
@@ -489,6 +501,7 @@ async def generate_response(
                 }
             )
             async with asyncio.timeout(60):
+                tool_attempts += len(payload.web_sources)
                 fetched = await asyncio.gather(
                     *(
                         app.state.integration_services.web.fetch(source.url)
@@ -578,6 +591,9 @@ async def generate_response(
                     progress: asyncio.Queue[dict] = asyncio.Queue()
 
                     def on_step(step, phase, result):
+                        nonlocal tool_attempts
+                        if phase == "running":
+                            tool_attempts += 1
                         progress.put_nowait(
                             {
                                 "type": "status",
@@ -713,6 +729,8 @@ async def generate_response(
                         yield ndjson({"type": "reset", "detail": token.detail})
                         continue
                     result_content += token
+                    if first_token_ms is None and token.strip():
+                        first_token_ms = int((time.monotonic() - started) * 1000)
                     yield ndjson({"type": "token", "content": token})
                     if len(result_content) > 200000:
                         raise RuntimeError("Response exceeded the output size limit")
@@ -785,22 +803,40 @@ async def generate_response(
     finally:
         app.state.active_generations.pop(conversation_id, None)
         app.state.generation_tasks.pop(conversation_id, None)
-        if assistant_id:
-            with app.state.database.session() as session:
-                assistant = session.get(Message, assistant_id)
-                run = session.get(AgentRun, run_id)
-                if assistant:
-                    assistant.content, assistant.status, assistant.traces, assistant.model = (
-                        result_content,
-                        final_status,
-                        traces,
-                        model or None,
-                    )
-                if run:
-                    run.status, run.finished_at = final_status, now()
-                    run.latency_ms = int((time.monotonic() - started) * 1000)
-                    run.evidence = {"traces": traces}
-                session.commit()
+        try:
+            if assistant_id:
+                with app.state.database.session() as session:
+                    assistant = session.get(Message, assistant_id)
+                    run = session.get(AgentRun, run_id)
+                    if assistant:
+                        assistant.content, assistant.status, assistant.traces, assistant.model = (
+                            result_content,
+                            final_status,
+                            traces,
+                            model or None,
+                        )
+                    if run:
+                        run.status, run.finished_at = final_status, now()
+                        run.latency_ms = int((time.monotonic() - started) * 1000)
+                        run.evidence = {
+                            "traces": traces,
+                            "metrics": run_metrics(
+                                settings,
+                                traces,
+                                result_content,
+                                measurements,
+                                first_token_ms=first_token_ms,
+                                tool_attempts=tool_attempts,
+                                retrieval_fallback=bool(
+                                    settings.roles["embedding"]
+                                    and query_vector is None
+                                    and retrieval_completed
+                                ),
+                            ),
+                        }
+                    session.commit()
+        finally:
+            provider_observations.reset(measurement_scope)
     if assistant_id:
         with app.state.database.session() as session:
             assistant = session.get(Message, assistant_id)

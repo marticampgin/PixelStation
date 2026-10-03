@@ -6,6 +6,7 @@ from typing import Any, Protocol
 import httpx
 from pydantic import BaseModel
 
+from ..observability import observe_provider
 from .reasoning import ReasoningFilter, public_structured_content
 
 
@@ -119,8 +120,19 @@ class OllamaProvider:
                         {
                             "name": name,
                             "size": model.get("size", 0),
+                            "digest": model.get("digest")
+                            if isinstance(model.get("digest"), str)
+                            else None,
                             "capabilities": info.get("capabilities", ["completion"]),
                             "details": model.get("details", {}),
+                            "context_length": next(
+                                (
+                                    value
+                                    for key, value in info.get("model_info", {}).items()
+                                    if key.endswith("context_length") and isinstance(value, int)
+                                ),
+                                None,
+                            ),
                         }
                     )
             result = {"available": True, "models": models}
@@ -191,6 +203,8 @@ class OllamaProvider:
                         raise UnsupportedToolCall(
                             "The model requested a tool during answer synthesis"
                         )
+                    if chunk.get("done"):
+                        observe_provider(chunk, "stream", model)
                     if content := chunk.get("message", {}).get("content"):
                         if visible := public_content.feed(content):
                             yield visible
@@ -228,6 +242,7 @@ class OllamaProvider:
                     },
                 )
                 response.raise_for_status()
+                observe_provider(response.json(), "structured", model)
                 try:
                     return schema.model_validate_json(
                         public_structured_content(response.json()["message"]["content"])
@@ -254,6 +269,7 @@ class OllamaProvider:
                 json={"model": model, "input": texts, "keep_alive": "0"},
             )
             response.raise_for_status()
+            observe_provider(response.json(), "embedding", model)
             return response.json()["embeddings"]
 
     async def describe(self, model: str, prompt: str, images: list[str]) -> str:

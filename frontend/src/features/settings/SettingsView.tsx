@@ -7,7 +7,7 @@ import type { Station } from '../../hooks/useStation';
 import type { IntegrationStatus, Settings } from '../../types';
 import { GoogleSetup } from '../google/GoogleSetup';
 import { SearxSetup } from '../web/SearxSetup';
-import { HarnessReports, type HarnessReport } from './HarnessReports';
+import { HarnessPanel } from './HarnessPanel';
 import {
   acceptsRole,
   liteModel,
@@ -32,7 +32,6 @@ export function SettingsView({ station }: { station: Station }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const [reports, setReports] = useState<HarnessReport[] | null>(null);
   const [cacheConfirm, setCacheConfirm] = useState(false);
   const [dataPath, setDataPath] = useState('');
   useEffect(() => {
@@ -41,9 +40,6 @@ export function SettingsView({ station }: { station: Station }) {
       .then(setSettings)
       .catch((err) => setError(errorMessage(err)));
   }, []);
-  useEffect(() => {
-    if (tab === 'Harness') void loadHarness();
-  }, [tab]);
   useEffect(() => {
     if (tab === 'Data')
       void request<{ path: string }>('/data')
@@ -74,14 +70,6 @@ export function SettingsView({ station }: { station: Station }) {
       setSettings(next);
       await station.refreshModels();
     }, 'Settings saved');
-  }
-  async function loadHarness() {
-    try {
-      const result = await request<{ reports: HarnessReport[] }>('/harness');
-      setReports(result.reports);
-    } catch (err) {
-      setError(errorMessage(err));
-    }
   }
   async function testIntegration(name: 'images' | 'web') {
     await action(async () => {
@@ -385,36 +373,7 @@ export function SettingsView({ station }: { station: Station }) {
               </p>
             </section>
           ) : null}
-          {tab === 'Harness' ? (
-            <>
-              <section className="section">
-                <h2>Friction reports</h2>
-                <div className="settings-toggles">
-                  {toggle('harness_enabled', 'Enable scheduled harness reports')}
-                </div>
-                <div className="form-grid">
-                  {numberField('harness_interval_hours', 'Report interval in hours', 1, 168)}
-                </div>
-                <p className="subtle">
-                  Reports diagnose failures and propose regression cases. Source changes require
-                  review and are disabled.
-                </p>
-                <button
-                  className="button secondary"
-                  disabled={busy}
-                  onClick={() =>
-                    void action(async () => {
-                      await post('/harness/run');
-                      await loadHarness();
-                    }, 'Report generated')
-                  }
-                >
-                  Generate report now
-                </button>
-              </section>
-              <HarnessReports reports={reports} />
-            </>
-          ) : null}
+          {tab === 'Harness' ? <HarnessPanel settings={settings} onSettings={setSettings} /> : null}
           {tab === 'Data' ? (
             <section className="section">
               <h2>Local data</h2>
