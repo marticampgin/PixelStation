@@ -414,11 +414,13 @@ export function PokerView() {
             />
             <strong>{turnLabel}</strong>
             <span>
-              {latest?.seat !== null && latest?.seat !== undefined
-                ? `${state.seats[latest.seat]?.name ?? 'Player'} · ${actionName(latest.action)}${latest.amount ? ` ${latest.amount}` : ''}`
-                : latest?.action === 'deal'
-                  ? `${actionName(latest.stage)} cards dealt`
-                  : 'Follow the highlighted seat'}
+              {state.completed
+                ? 'Result and action log saved below'
+                : latest?.seat !== null && latest?.seat !== undefined
+                  ? `${state.seats[latest.seat]?.name ?? 'Player'} · ${actionName(latest.action)}${latest.amount ? ` ${latest.amount}` : ''}`
+                  : latest?.action === 'deal'
+                    ? `${actionName(latest.stage)} cards dealt`
+                    : 'Follow the highlighted seat'}
             </span>
           </div>
           <div
