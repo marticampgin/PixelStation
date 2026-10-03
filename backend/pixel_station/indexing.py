@@ -16,6 +16,8 @@ async def embed_query(app, query: str) -> list[float] | None:
     try:
         async with asyncio.timeout(45), app.state.model_queue.lock:
             vectors = await app.state.llm.embed(model, [query[:6000]])
+        if app.state.settings().roles["embedding"] != model:
+            return None
         return vectors[0]
     except Exception as exc:
         with app.state.database.session() as session:
@@ -59,8 +61,10 @@ async def index_pending(app) -> None:
         if app.state.settings().roles["embedding"] != model:
             return
         with app.state.database.session() as session:
-            for (model_class, identity, _), vector in zip(pending, vectors, strict=True):
-                SqliteVectorStore(session, model_class).add(identity, vector)
+            for (model_class, identity, source_text), vector in zip(pending, vectors, strict=True):
+                row = session.get(model_class, identity)
+                if row and row.text == source_text:
+                    SqliteVectorStore(session, model_class).add(identity, vector)
             session.commit()
     except Exception as exc:
         delay_minutes = 60

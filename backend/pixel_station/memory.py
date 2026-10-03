@@ -3,7 +3,7 @@ import re
 from datetime import UTC, datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
@@ -19,6 +19,7 @@ from .database import (
     now,
     record_dict,
 )
+from .indexing import embed_query
 from .vectors import SqliteVectorStore
 
 router = APIRouter(prefix="/api/memory", tags=["memory"])
@@ -94,7 +95,7 @@ def search_memory(
     )
     ranked = []
     for row in session.scalars(query_stmt):
-        if not row.pinned and row.id not in lexical and row.id not in vectors:
+        if not row.pinned and row.id not in lexical and vectors.get(row.id, 0) <= 0.15:
             continue
         age_days = max(
             0, (datetime.now(UTC) - datetime.fromisoformat(row.updated_at)).total_seconds() / 86400
@@ -148,9 +149,15 @@ def create_memory(session: Session, payload: MemoryInput) -> Memory:
 
 
 @router.get("")
-def list_memory(q: str = "", category: str | None = None, session: Session = Depends(get_session)):
+async def list_memory(
+    request: Request,
+    q: str = "",
+    category: str | None = None,
+    session: Session = Depends(get_session),
+):
     if q:
-        items = search_memory(session, q, 100)
+        embedding = await embed_query(request.app, q)
+        items = search_memory(session, q, 100, embedding=embedding)
         return [item for item in items if not category or item["category"] == category]
     statement = select(Memory).order_by(Memory.pinned.desc(), Memory.updated_at.desc())
     if category:
@@ -162,8 +169,11 @@ def list_memory(q: str = "", category: str | None = None, session: Session = Dep
 
 
 @router.get("/search")
-def query_memory(q: str, limit: int = 4, session: Session = Depends(get_session)):
-    return search_memory(session, q, max(1, min(limit, 8)))
+async def query_memory(
+    request: Request, q: str, limit: int = 4, session: Session = Depends(get_session)
+):
+    embedding = await embed_query(request.app, q)
+    return search_memory(session, q, max(1, min(limit, 8)), embedding=embedding)
 
 
 @router.post("")

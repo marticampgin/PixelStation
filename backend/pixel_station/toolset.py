@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 
 from .database import record_dict
 from .files import FileCreate, retrieve_files, write_generated
+from .indexing import embed_query
 from .integrations import EmailInput, EventInput
 from .memory import MemoryInput, create_memory, search_memory
 from .orchestration import Tool, ToolRegistry
@@ -68,16 +69,20 @@ def build_tools(app) -> ToolRegistry:
         )
 
     async def query_memories(query=""):
+        vector = await embed_query(app, query) if query else None
         with app.state.database.session() as session:
-            return search_memory(session, query, app.state.settings().retrieval_count)
+            return search_memory(
+                session, query, app.state.settings().retrieval_count, embedding=vector
+            )
 
     async def save_memory(**kwargs):
         with app.state.database.session() as session:
             return record_dict(create_memory(session, MemoryInput.model_validate(kwargs)))
 
     async def query_file(attachment_ids, query):
+        vector = await embed_query(app, query)
         with app.state.database.session() as session:
-            return retrieve_files(session, attachment_ids, query)
+            return retrieve_files(session, attachment_ids, query, embedding=vector)
 
     async def create_file(**kwargs):
         import asyncio

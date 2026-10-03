@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Route(BaseModel):
@@ -39,7 +39,12 @@ class Route(BaseModel):
 def route_prompt(content: str, attachments: list[str] | None = None) -> Route:
     text = content.lower().strip()
     tests = [
-        (r"\b(edit|revise|update|replace)\b.{0,40}\b(file|document|spreadsheet|pdf|docx|xlsx|csv|notes)\b", "file_edit", ["file_edit"], True),
+        (
+            r"\b(edit|revise|update|replace)\b.{0,40}\b(file|document|spreadsheet|pdf|docx|xlsx|csv|notes)\b",
+            "file_edit",
+            ["file_edit"],
+            True,
+        ),
         (r"\bdelete\b.{0,30}\b(email|mail)\b", "system_help", [], False),
         (
             r"(^/image\b|\b(generate|create|draw|make)\b.{0,35}\b(image|picture|illustration)\b)",
@@ -216,14 +221,18 @@ class ToolRegistry:
 
 
 class PlanStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     id: str
     tool: str
     args: dict = Field(default_factory=dict)
     depends_on: list[str] = Field(default_factory=list)
+    args_from: str | None = None
+    result_index: int = Field(default=0, ge=0, le=19)
 
 
 class Plan(BaseModel):
-    steps: list[PlanStep] = Field(max_length=12)
+    model_config = ConfigDict(extra="forbid")
+    steps: list[PlanStep] = Field(min_length=1, max_length=12)
 
     def validate_dag(self, allowed: set[str], limit: int) -> None:
         if len(self.steps) > limit or len({step.id for step in self.steps}) != len(self.steps):
@@ -237,21 +246,63 @@ class Plan(BaseModel):
             for step in ready:
                 if step.tool not in allowed:
                     raise ValueError("Plan selected irrelevant or nonexistent tool")
+                if step.args_from and (
+                    step.args_from not in step.depends_on or step.tool != "web_fetch"
+                ):
+                    raise ValueError("Fetch evidence must reference a completed search dependency")
                 visited.add(step.id)
                 pending.remove(step)
 
 
-async def execute_plan(plan: Plan, registry: ToolRegistry, limit: int, timeout: float = 90) -> dict:
-    plan.validate_dag(set(registry.tools), limit)
+async def execute_plan(
+    plan: Plan,
+    registry: ToolRegistry,
+    limit: int,
+    timeout: float = 90,
+    allowed_tools: set[str] | None = None,
+    continue_on_error: bool = False,
+    on_step=None,
+) -> dict:
+    plan.validate_dag(allowed_tools if allowed_tools is not None else set(registry.tools), limit)
     evidence: dict[str, Any] = {}
     pending = list(plan.steps)
     async with asyncio.timeout(timeout):
         while pending:
             ready = [step for step in pending if set(step.depends_on) <= set(evidence)]
-            results = await asyncio.gather(
-                *(registry.execute(step.tool, step.args) for step in ready)
-            )
+
+            async def run(step):
+                args = step.args.copy()
+                if step.args_from:
+                    source = evidence[step.args_from]
+                    if not isinstance(source, list) or step.result_index >= len(source):
+                        return {
+                            "error": "No search result available for this fetch",
+                            "skipped": True,
+                        }
+                    chosen = source[step.result_index]
+                    if not isinstance(chosen, dict) or not chosen.get("url"):
+                        return {"error": "Search result has no source URL", "skipped": True}
+                    args["url"] = chosen["url"]
+                if on_step:
+                    on_step(step, "running", None)
+                result = await registry.execute(step.tool, args)
+                return result
+
+            tasks = [asyncio.create_task(run(step)) for step in ready]
+            try:
+                results = await asyncio.gather(*tasks, return_exceptions=continue_on_error)
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
             for step, result in zip(ready, results, strict=True):
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
+                if isinstance(result, Exception):
+                    result = {"error": str(result)[:1000]}
                 evidence[step.id] = result
+                if on_step:
+                    on_step(step, "complete", result)
                 pending.remove(step)
     return evidence

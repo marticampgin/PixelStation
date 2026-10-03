@@ -73,6 +73,10 @@ class OllamaError(RuntimeError):
     pass
 
 
+class UnsupportedToolCall(OllamaError):
+    pass
+
+
 class OllamaProvider:
     """Native local Ollama API. Reasoning fields are never retained."""
 
@@ -180,6 +184,10 @@ class OllamaProvider:
                     chunk = json.loads(line)
                     if chunk.get("error"):
                         raise OllamaError(chunk["error"])
+                    if chunk.get("message", {}).get("tool_calls"):
+                        raise UnsupportedToolCall(
+                            "The model requested a tool during answer synthesis"
+                        )
                     if content := chunk.get("message", {}).get("content"):
                         yield content
 

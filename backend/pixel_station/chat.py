@@ -26,7 +26,9 @@ from .files import IMAGE_EXTENSIONS, FileCreate, retrieve_files, write_generated
 from .google_tools import google_chat_action
 from .indexing import embed_query
 from .memory import MemoryInput, compact_conversation, create_memory, search_memory
-from .orchestration import classify_ambiguous, route_prompt
+from .orchestration import Plan, Route, classify_ambiguous, route_prompt
+from .providers import UnsupportedToolCall
+from .research import run_research, validate_research_plan
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
@@ -129,10 +131,6 @@ class ArtifactOutput(BaseModel):
     content: str = Field(min_length=1, max_length=100000)
 
 
-class ResearchPlan(BaseModel):
-    queries: list[str] = Field(min_length=2, max_length=4)
-
-
 class CriticOutput(BaseModel):
     valid: bool
     issues: list[str] = Field(default_factory=list, max_length=5)
@@ -186,6 +184,7 @@ async def stream_with_cancel(provider, model, messages, cancel_event):
 async def answer_stream(app, model, context, cancel_event, traces):
     """Suppress native tool protocol and retry once with an explicit answer-only instruction."""
     import re
+
     for attempt in range(2):
         prefix = ""
         started_text = False
@@ -195,7 +194,10 @@ async def answer_stream(app, model, context, cancel_event, traces):
             async for token in stream:
                 if not started_text:
                     prefix += token
-                    if re.search(r"<\|tool_call[^>]*\|>|\[\s*(read_file|file_retrieve|web_search)\s*\(", prefix):
+                    if re.search(
+                        r"<\|tool_call[^>]*\|>|\[\s*(read_file|file_retrieve|web_search)\s*\(",
+                        prefix,
+                    ):
                         unsupported = True
                         break
                     if prefix.lstrip() and (prefix.lstrip()[0] not in "<[`" or len(prefix) >= 96):
@@ -209,14 +211,24 @@ async def answer_stream(app, model, context, cancel_event, traces):
                     yield token
             if prefix and not unsupported:
                 yield prefix
+        except UnsupportedToolCall:
+            unsupported = True
         finally:
             await stream.aclose()
         if not unsupported:
             return
-        traces.append({"validation": "unsupported_tool_protocol", "retry": attempt+1})
+        traces.append({"validation": "unsupported_tool_protocol", "retry": attempt + 1})
         if attempt == 1:
-            raise RuntimeError("The local model returned a tool call instead of an answer after one retry. Try another model or ask a more specific question about the supplied excerpt.")
-        context = [*context, {"role": "user", "content": "The application already read the document and provided its text above. No tool calls are allowed. Answer the previous question directly from that evidence, in plain text. If the answer is absent, say so."}]
+            raise RuntimeError(
+                "The local model returned a tool call instead of an answer after one retry. Try another model or ask a more specific question about the supplied excerpt."
+            )
+        context = [
+            *context,
+            {
+                "role": "user",
+                "content": "The application already read the document and provided its text above. No tool calls are allowed. Answer the previous question directly from that evidence, in plain text. If the answer is absent, say so.",
+            },
+        ]
 
 
 async def generate_response(
@@ -226,6 +238,8 @@ async def generate_response(
     settings = app.state.settings()
     model = payload.model or settings.roles["primary_chat"]
     route = route_prompt(payload.content, payload.attachment_ids)
+    if payload.web_sources:
+        route = Route(intent="normal_chat", complexity="tool", tools_needed=["web_fetch"])
     assistant_id = None
     run_id = None
     result_content = ""
@@ -350,7 +364,8 @@ async def generate_response(
             assistant.memory_ids = [memory["id"] for memory in memories]
             assistant.attachment_ids = active_ids
             session.commit()
-        route = await classify_ambiguous(app, payload.content, route)
+        if not payload.web_sources:
+            route = await classify_ambiguous(app, payload.content, route)
         traces = [{"route": route.model_dump()}]
         with app.state.database.session() as session:
             run = session.get(AgentRun, run_id)
@@ -372,6 +387,10 @@ async def generate_response(
         web_sources = []
         direct_content = None
         if payload.web_sources:
+            if len(payload.web_sources) > settings.max_steps:
+                raise ValueError(
+                    f"Reading {len(payload.web_sources)} selected sources exceeds the {settings.max_steps}-step tool budget. Select fewer sources or increase max steps in Settings."
+                )
             yield ndjson(
                 {
                     "type": "status",
@@ -396,7 +415,9 @@ async def generate_response(
         ):
             direct_content = "Email deletion is not supported by the current Gmail scopes. Open Gmail to delete the email."
         elif route.intent == "file_edit":
-            yield ndjson({"type": "status", "stage": "file_edit", "detail": "Preparing a file edit proposal"})
+            yield ndjson(
+                {"type": "status", "stage": "file_edit", "detail": "Preparing a file edit proposal"}
+            )
             async with asyncio.timeout(120):
                 proposal = await propose_chat_edit(app, active_ids, payload.content)
             direct_content = proposal["content"]
@@ -429,28 +450,77 @@ async def generate_response(
             async with asyncio.timeout(180):
                 if route.intent == "web_research" and model:
                     async with asyncio.timeout(90), app.state.model_queue.lock:
-                        plan = await app.state.llm.structured(
-                            settings.roles["planner"] or model,
-                            [
-                                {
-                                    "role": "system",
-                                    "content": "Plan 2–4 focused, short web search queries for this request. No invented URLs. Return only queries.",
-                                },
-                                {"role": "user", "content": payload.content},
-                            ],
-                            ResearchPlan,
-                        )
-                    research = await services.web.research(
-                        plan.queries[: min(4, settings.max_steps)],
-                        limit=min(4, settings.max_steps),
-                        max_steps=settings.max_steps,
-                    )
-                    tool_result = {
-                        "content": research["context"],
-                        "sources": research["sources"],
-                        "tool_steps": research["tool_steps"],
-                    }
+                        plan_messages = [
+                            {
+                                "role": "system",
+                                "content": f"Plan a read-only research DAG with at most {settings.max_steps} total steps. Only web_search and web_fetch are available. Use 2–4 independent web_search steps with args={{query:...}}, fewer only when the step budget is below 2. Each web_fetch must have args={{}}, args_from=<search step id>, result_index=0 or 1, depends_on=[<same search step id>]. Never write a URL yourself. Include at least one fetch when budget >=3. IDs must be unique; no cycles. Example budget3: search s1, search s2, fetch f1 depending on s1.",
+                            },
+                            {"role": "user", "content": payload.content},
+                        ]
+                        for plan_attempt in range(2):
+                            try:
+                                plan = await app.state.llm.structured(
+                                    settings.roles["planner"] or model,
+                                    plan_messages,
+                                    Plan,
+                                    validation_retries=0,
+                                    num_predict=1536,
+                                )
+                                validate_research_plan(plan, settings.max_steps)
+                                break
+                            except (ValueError, RuntimeError) as exc:
+                                traces.append(
+                                    {
+                                        "validation": "research_plan_error",
+                                        "retry": plan_attempt,
+                                        "error": str(exc)[:500],
+                                    }
+                                )
+                                if plan_attempt == 1:
+                                    raise
+                                plan_messages.append(
+                                    {
+                                        "role": "user",
+                                        "content": f"Correct the plan once. Validation error: {str(exc)[:500]}. Use only the allowed tools and fields.",
+                                    }
+                                )
                     traces.append({"plan": plan.model_dump()})
+                    progress: asyncio.Queue[dict] = asyncio.Queue()
+
+                    def on_step(step, phase, result):
+                        progress.put_nowait(
+                            {
+                                "type": "status",
+                                "stage": step.tool,
+                                "detail": f"{step.tool.replace('_', ' ').capitalize()} · {phase}",
+                                "step_id": step.id,
+                            }
+                        )
+
+                    research_task = asyncio.create_task(
+                        run_research(plan, app.state.tool_registry, settings.max_steps, on_step)
+                    )
+                    waiter = None
+                    try:
+                        while not research_task.done() or not progress.empty():
+                            waiter = asyncio.create_task(progress.get())
+                            done, _ = await asyncio.wait(
+                                {research_task, waiter}, return_when=asyncio.FIRST_COMPLETED
+                            )
+                            if waiter in done:
+                                yield ndjson(waiter.result())
+                            else:
+                                waiter.cancel()
+                                await asyncio.gather(waiter, return_exceptions=True)
+                        tool_result = research_task.result()
+                    finally:
+                        if waiter and not waiter.done():
+                            waiter.cancel()
+                        if not research_task.done():
+                            research_task.cancel()
+                        await asyncio.gather(
+                            research_task, *([waiter] if waiter else []), return_exceptions=True
+                        )
                 elif route.intent in {
                     "gmail_send",
                     "gmail_draft",
@@ -592,6 +662,8 @@ async def generate_response(
                         if web_sources
                         else critique.revised_response
                     )
+        if not result_content.strip():
+            raise RuntimeError("The local model returned no answer. Check the model and try again.")
         final_status = "complete"
     except asyncio.CancelledError:
         final_status = "interrupted"

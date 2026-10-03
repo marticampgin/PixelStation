@@ -75,6 +75,24 @@ class FakeLLM:
             return schema(filename="notes.md", format="md", content="# Notes\nLocally generated")
         if schema.__name__ == "DraftBody":
             return schema(body="Thank you for your email.")
+        if schema.__name__ == "Plan":
+            return schema(
+                steps=[
+                    {"id": "s1", "tool": "web_search", "args": {"query": "local inference facts"}},
+                    {
+                        "id": "s2",
+                        "tool": "web_search",
+                        "args": {"query": "local inference details"},
+                    },
+                    {
+                        "id": "f1",
+                        "tool": "web_fetch",
+                        "args": {},
+                        "depends_on": ["s1"],
+                        "args_from": "s1",
+                    },
+                ]
+            )
         raise AssertionError(f"Unexpected schema {schema}")
 
     async def embed(self, model, texts):
@@ -646,6 +664,164 @@ async def test_concrete_registry_core_tools_execute(app):
         "file_retrieve", {"attachment_ids": [file["id"]], "query": "notes"}
     )
     assert chunks[0]["text"] == "Violet notes"
+
+
+async def test_unsupported_tool_protocol_retries_without_emitting_it(app):
+    from pixel_station.chat import answer_stream
+    from pixel_station.providers import UnsupportedToolCall
+
+    attempts = 0
+
+    async def stream(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            yield "<|tool_call_"
+            yield "start|>[read_file(filename='notes.txt')]<|tool_call_end|>"
+        else:
+            yield "The code is violet-42."
+
+    app.state.llm.stream = stream
+    traces = []
+    answer = "".join(
+        [
+            value
+            async for value in answer_stream(
+                app,
+                "local",
+                [{"role": "user", "content": "What is the code?"}],
+                asyncio.Event(),
+                traces,
+            )
+        ]
+    )
+    assert answer == "The code is violet-42."
+    assert attempts == 2
+    assert traces[0]["validation"] == "unsupported_tool_protocol"
+    attempts = 0
+
+    async def native(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise UnsupportedToolCall("read_file")
+        yield "The code is violet-42."
+
+    app.state.llm.stream = native
+    answer = "".join(
+        [value async for value in answer_stream(app, "local", [], asyncio.Event(), [])]
+    )
+    assert "violet-42" in answer and attempts == 2
+
+
+def test_memory_workspace_search_uses_local_query_embedding(client, app):
+    from pixel_station.database import Memory
+
+    memory = client.post("/api/memory", json={"text": "Prefers quiet rooms"}).json()
+    settings = client.get("/api/settings").json()
+    settings["roles"]["embedding"] = "local-test:latest"
+    client.put("/api/settings", json=settings)
+    with app.state.database.session() as session:
+        session.get(Memory, memory["id"]).embedding = [1.0, 0.0]
+        session.commit()
+    assert client.get("/api/memory?q=tranquility").json()[0]["id"] == memory["id"]
+    assert (
+        "semantic match"
+        in client.get("/api/memory/search?q=tranquility").json()[0]["retrieval_reason"]
+    )
+
+
+def test_complex_chat_runs_real_read_only_dag(client, app):
+    calls = []
+
+    async def search(query):
+        calls.append(("search", query))
+        return [
+            {
+                "url": "https://example.com/source",
+                "title": "Local source",
+                "snippet": "Local inference facts",
+            }
+        ]
+
+    async def fetch(url):
+        calls.append(("fetch", url))
+        return {
+            "url": url,
+            "title": "Real source",
+            "text": "Actual fetched evidence about local inference.",
+        }
+
+    app.state.tool_registry.tools["web_search"].execute = search
+    app.state.tool_registry.tools["web_fetch"].execute = fetch
+    cid = client.post("/api/conversations", json={}).json()["id"]
+    result = events(
+        client.post(
+            f"/api/conversations/{cid}/messages",
+            json={"content": "Research online sources about local inference"},
+        )
+    )
+    assert result[-1]["message"]["status"] == "complete"
+    assert [kind for kind, _ in calls].count("search") == 2
+    assert calls[-1] == ("fetch", "https://example.com/source")
+    trace = next(
+        trace for trace in result[-1]["message"]["traces"] if trace.get("tool") == "web_research"
+    )
+    assert trace["result"]["tool_steps"] == {"search": 2, "fetch": 1, "total": 3, "budget": 6}
+    assert "Actual fetched evidence" in app.state.llm.requests[-1][0]["content"]
+
+
+def test_selected_sources_cannot_exceed_agent_tool_budget(client, app):
+    settings = client.get("/api/settings").json()
+    settings["max_steps"] = 1
+    client.put("/api/settings", json=settings)
+    calls = []
+
+    async def fetch(url):
+        calls.append(url)
+        return {"url": url, "title": "Source", "text": "Evidence"}
+
+    app.state.integration_services.web.fetch = fetch
+    cid = client.post("/api/conversations", json={}).json()["id"]
+    result = events(
+        client.post(
+            f"/api/conversations/{cid}/messages",
+            json={
+                "content": "Research these selected sources",
+                "web_sources": [
+                    {"url": "https://example.com/one"},
+                    {"url": "https://example.com/two"},
+                ],
+            },
+        )
+    )
+    assert result[-1]["message"]["status"] == "error"
+    assert "tool budget" in result[-1]["message"]["content"]
+    assert not calls
+
+
+async def test_indexer_never_applies_old_text_vector_after_memory_edit(app):
+    from pixel_station.database import Memory
+    from pixel_station.indexing import index_pending
+
+    settings = app.state.settings()
+    settings.roles["embedding"] = "local-test:latest"
+    app.state.set_settings(settings)
+    with app.state.database.session() as session:
+        memory = create_memory(session, MemoryInput(text="Old preference"))
+        identity = memory.id
+
+    async def embed(model, texts):
+        with app.state.database.session() as session:
+            session.get(Memory, identity).text = "New preference"
+            session.commit()
+        return [[1.0, 0.0]]
+
+    app.state.llm.embed = embed
+    await index_pending(app)
+    with app.state.database.session() as session:
+        assert session.get(Memory, identity).text == "New preference"
+        assert session.get(Memory, identity).embedding is None
 
 
 def test_restart_preserves_chat_memory_and_settings(tmp_path):

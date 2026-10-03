@@ -124,11 +124,19 @@ def create_app(data_dir: Path | None = None, llm=None, discover: bool = True) ->
 
     @app.exception_handler(httpx.HTTPError)
     async def provider_http_error(_request, exc):
-        return JSONResponse({"detail": f"Provider request failed: {str(exc)[:500]}"}, status_code=503)
+        return JSONResponse(
+            {"detail": f"Provider request failed: {str(exc)[:500]}"}, status_code=503
+        )
 
     @app.exception_handler(TimeoutError)
     async def provider_timeout(_request, _exc):
-        return JSONResponse({"detail": "The local provider exceeded its execution time limit. Check the service and retry."}, status_code=504)
+        return JSONResponse(
+            {
+                "detail": "The local provider exceeded its execution time limit. Check the service and retry."
+            },
+            status_code=504,
+        )
+
     app.state.database = database
     app.state.data_dir = (data_dir or data_directory()).resolve()
     app.state.settings, app.state.set_settings = get_settings, set_settings
