@@ -1,0 +1,14 @@
+use_default_settings: true
+general:
+  instance_name: Pixel Station Search
+search:
+  safe_search: 1
+  formats:
+    - html
+    - json
+server:
+  limiter: false
+  public_instance: false
+  image_proxy: false
+outgoing:
+  request_timeout: 8.0
