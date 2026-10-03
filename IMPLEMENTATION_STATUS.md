@@ -14,7 +14,7 @@
 - Local friction reports, regression candidates, idle persistent scheduling and consistent backups including nested databases and pending file replacements.
 - Custom dark navy/violet interface, separate desktop panel preferences, compact-screen drawers and real setup/error states for absent providers.
 - Single-command Windows launcher, developer guidance, provider setup documentation, actual UI screenshot and separate hashed CI dependencies.
-- Automated verification: **258 backend tests and 44 frontend tests pass**; Ruff, backend mypy, TypeScript production build and frontend formatting pass. GitHub's Linux CI passed with the universal hashed dependency lock, including the previous functional fixes, watchtower and Poker increments (runs 37120189618, 37120508465, 37135175493 and 37135196482).
+- Automated verification: **305 backend tests and 51 frontend tests pass**; Ruff, backend mypy, TypeScript production build and frontend formatting pass. GitHub's Linux CI passed with the universal hashed dependency lock, including the Poker evidence, policy and strategy-gate increment (run 37138271693).
 - Live Windows/API/UI verification: native GPU chat, attached-file answers with sources, memory edit/revision/restart, confirmed file edit/original revision, native conversation summary, 1024-dimensional memory/document embeddings, complete legal AI Poker hand without fallback, harness reports and launcher shutdown/restart.
 - Desktop 1536×1024 and compact 390×844 rendered checks; corrected model-control wrapping and overlapping mobile drawers. Optional services display their genuine unconfigured state.
 - Final in-app browser page identity, meaningful DOM, overlay, console and interaction checks passed. Independently toggled desktop panels survive reload; compact navigation closes its drawer and the exposed backdrop dismisses context.
@@ -30,10 +30,12 @@
 - Settings → Harness now exposes content-free passive metrics, native Ollama counters, latency sample counts, repairs/fallbacks, bounded diagnostic downloads and versioned isolated gates. Six research steps/four retrieved memories are documented conservative starting limits, not tuned best-practice optima or universal quotas.
 - Two final native runner-3 evaluation runs passed all nine gates with the unchanged fixture. The supplied-file answer recorded one protocol rejection and one bounded repair in each passing run. Matching used actual checkpoint digest, Ollama identity, package versions, fixture and configuration; old failed reports remain preserved. Default diagnostics downloaded through Chrome excluded prompts, outputs, fixture filenames and reasoning. See [verification scope](docs/QA.md) and [evaluation guide](docs/EVALUATIONS.md).
 - Final rendered Chrome checks at 1448×1086 and 390×844 passed without horizontal overflow. The reference comparison covered branding, colors, rail/inspector layout, compact spacing, carets, scenery and composer placement. A fresh final tab had no console warnings/errors; the deliberately public README capture contains an empty conversation and no private history.
+- Poker decisions now receive own-card/public-board evidence, position, pot odds, stack exposure, transparent hand tiers and a bounded 128-sample random-opponent equity estimate. Subtle styles, capped raises/commitments, a free-check guard and price-aware fallback are enforced separately from model judgment; preflop strength does not bypass postflop risk checks. Whole decisions include context/queue/repair in a 15-second ceiling and retain finite decision labels without reasoning narratives.
+- Six additional isolated Poker gates and six separately opted-in native strategy scenarios expose legality versus risk/value quality, rejected actions, repairs, fallbacks and actual native usage. Runner 4 groups comparisons by both opted-in scopes and policy/context source hashes. Two normal six-seat hands conserved 6,000 chips with no preflop all-ins across 13 decisions; however, the last strategy trial passed only 2/6 native cases. Remaining judgment errors are recorded honestly; further prompt tuning was stopped at the user's request.
 
 ## Currently working
 
-- This interface, Poker and watchtower refinement phase is complete. Optional integration setup is the next phase.
+- Poker prompt tuning is stopped; bounded behavior and failure measurements are in place. Beginning optional image-generation setup while Web and Google require owner/system steps.
 
 ## Blocked on account or system setup
 

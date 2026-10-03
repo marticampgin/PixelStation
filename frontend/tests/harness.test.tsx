@@ -224,50 +224,69 @@ describe('local watchtower', () => {
     expect(fetcher.mock.calls.every(([url]) => url === '/api/harness')).toBe(true);
   });
 
-  it('keeps global chat limits out of Poker run budgets', async () => {
-    const configuration = { retrieval_count: 4, max_steps: 6, bounded_response_tokens: 2048 };
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () =>
-        json({
-          ...summary,
-          metrics: {
-            ...summary.metrics,
-            budgets: [
-              { id: 'poker-run', route: 'poker_bot', configuration },
-              {
-                id: 'chat-run',
-                route: 'file_qa',
-                configuration,
-                retrieved_memories: 2,
-                tool_steps: 3,
-                public_output_tokens_estimated: 31,
-              },
-            ],
-          },
-        }),
-      ),
-    );
-    render(<HarnessPanel settings={settings} onSettings={vi.fn()} />);
-    await screen.findByText('Recorded runs · 7 days');
-    await userEvent.click(
-      screen.getByRole('button', { name: 'Native token measurements and budget use' }),
-    );
-    const poker = screen.getByRole('row', { name: /^poker_bot/ });
-    const cells = within(poker).getAllByRole('cell');
-    expect(cells[1]).toHaveTextContent('Not recorded');
-    expect(cells[2]).toHaveTextContent('Not applicable');
-    expect(cells[3]).toHaveTextContent('Generation limit not recorded');
-    expect(cells[4]).toHaveTextContent('Not applicable');
-    expect(poker).not.toHaveTextContent('2048');
-    expect(poker).not.toHaveTextContent('/ 4');
-    expect(poker).not.toHaveTextContent('Research ceiling');
-    const chat = screen.getByRole('row', { name: /^file_qa/ });
-    expect(chat).toHaveTextContent('2 / 4');
-    expect(chat).toHaveTextContent('Configured chat answer ceiling 2048');
-    expect(chat).toHaveTextContent('Research ceiling 6');
-    expect(screen.getByText(/Native usage is aggregated above/)).toBeInTheDocument();
-  });
+  it.each([
+    {
+      generationLimit: 180,
+      expected: 'Recorded per-attempt generation ceiling 180 tokens',
+    },
+    {
+      generationLimit: undefined,
+      expected: 'Per-attempt generation ceiling not recorded',
+    },
+  ])(
+    'keeps chat limits out of Poker budgets with recorded ceiling $generationLimit',
+    async ({ generationLimit, expected }) => {
+      const configuration = { retrieval_count: 4, max_steps: 6, bounded_response_tokens: 2048 };
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () =>
+          json({
+            ...summary,
+            metrics: {
+              ...summary.metrics,
+              budgets: [
+                {
+                  id: 'poker-run',
+                  route: 'poker_bot',
+                  configuration,
+                  generation_tokens_per_attempt: generationLimit,
+                },
+                {
+                  id: 'chat-run',
+                  route: 'file_qa',
+                  configuration,
+                  retrieved_memories: 2,
+                  tool_steps: 3,
+                  public_output_tokens_estimated: 31,
+                },
+              ],
+            },
+          }),
+        ),
+      );
+      render(<HarnessPanel settings={settings} onSettings={vi.fn()} />);
+      await screen.findByText('Recorded runs · 7 days');
+      await userEvent.click(
+        screen.getByRole('button', { name: 'Native token measurements and budget use' }),
+      );
+      const poker = screen.getByRole('row', { name: /^poker_bot/ });
+      const cells = within(poker).getAllByRole('cell');
+      expect(cells[1]).toHaveTextContent('Not recorded');
+      expect(cells[2]).toHaveTextContent('Not applicable');
+      expect(cells[3]).toHaveTextContent(expected);
+      expect(cells[3]).not.toHaveTextContent(/ceiling 0 tokens/);
+      if (generationLimit === undefined) expect(cells[3]).not.toHaveTextContent('180');
+      expect(cells[4]).toHaveTextContent('Not applicable');
+      expect(poker).not.toHaveTextContent('2048');
+      expect(poker).not.toHaveTextContent('/ 4');
+      expect(poker).not.toHaveTextContent('Research ceiling');
+      const chat = screen.getByRole('row', { name: /^file_qa/ });
+      expect(chat).toHaveTextContent('2 / 4');
+      expect(chat).toHaveTextContent('Configured chat answer ceiling 2048');
+      expect(chat).toHaveTextContent('Research ceiling 6');
+      expect(screen.getByText(/Native usage is aggregated above/)).toBeInTheDocument();
+    },
+  );
 
   it.each([
     { native: false, poker_native: true, scopes: 'Poker strategy' },

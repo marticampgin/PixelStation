@@ -242,6 +242,7 @@ def measurements(session, settings) -> dict:
                         "retrieved_memories",
                         "retrieved_chunks",
                         "public_output_tokens_estimated",
+                        "generation_tokens_per_attempt",
                         "tool_steps",
                         "budget_scope",
                     }

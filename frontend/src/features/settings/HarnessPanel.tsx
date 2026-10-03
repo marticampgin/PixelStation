@@ -302,7 +302,14 @@ export function HarnessPanel({
                             (row.route === 'poker_bot' ? 'Not recorded' : '—')}
                           <small>
                             {row.route === 'poker_bot' ? (
-                              'Generation limit not recorded'
+                              row.generation_tokens_per_attempt != null ? (
+                                <>
+                                  Recorded per-attempt generation ceiling{' '}
+                                  {row.generation_tokens_per_attempt} tokens
+                                </>
+                              ) : (
+                                'Per-attempt generation ceiling not recorded'
+                              )
                             ) : (
                               <>
                                 Configured chat answer ceiling{' '}
@@ -331,7 +338,8 @@ export function HarnessPanel({
               <p className="subtle">
                 Maximum steps applies to research/search-fetch and selected source reads. It is not
                 a universal tool or inference quota. Poker memory and research limits do not apply;
-                its generation limit is not recorded here. Native usage is aggregated above.
+                recorded Poker generation ceilings apply per attempt. Missing historical ceilings
+                remain unavailable. Native usage is aggregated above.
               </p>
             </Disclosure>
             <Disclosure

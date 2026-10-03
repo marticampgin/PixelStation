@@ -100,6 +100,7 @@ export interface Watchtower {
       retrieved_memories?: number;
       retrieved_chunks?: number;
       public_output_tokens_estimated?: number;
+      generation_tokens_per_attempt?: number;
       tool_steps?: number | null;
       configuration?: {
         retrieval_count: number;

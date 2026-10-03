@@ -78,6 +78,7 @@ def test_passive_poker_counts_distinguish_attempted_and_final_actions(tmp_path):
                             "raw_actions": raw,
                             "fallback_count": fallback,
                             "validation_rejections": 2 if fallback else 0,
+                            "generation_tokens_per_attempt": 180,
                         }
                     },
                 )
@@ -85,11 +86,13 @@ def test_passive_poker_counts_distinguish_attempted_and_final_actions(tmp_path):
         # A historical Poker run has no new action measurements; do not invent its action.
         session.add(AgentRun(route="poker_bot", status="complete", evidence={}))
         session.commit()
-        stats = measurements(session, app.state.settings())["poker_strategy"]
+        measured = measurements(session, app.state.settings())
+        stats = measured["poker_strategy"]
         assert stats["sample_count"] == 2 and stats["actions"] == {"fold": 1, "raise": 1}
         assert stats["native_without_fallback"] == 1 and stats["fallback_decisions"] == 1
         assert stats["preflop_all_ins"] == 0 and stats["raw_preflop_all_in_attempts"] == 2
         assert stats["validation_rejections"] == 2
+        assert all(row["generation_tokens_per_attempt"] == 180 for row in measured["budgets"])
         encoded = json.dumps([public_run(row) for row in session.query(AgentRun)])
         assert "all_in" in encoded and "reason_short" not in encoded
 
