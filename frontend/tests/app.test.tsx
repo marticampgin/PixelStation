@@ -210,6 +210,45 @@ describe('workstation interactions', () => {
     expect(sent?.content).toBe('Read my notes');
   });
 
+  it('clears rejected streaming content on reset while preserving the user request and repaired tokens', async () => {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const body = new ReadableStream<Uint8Array>({
+      start(value) {
+        controller = value;
+      },
+    });
+    mockApi((path, init) => {
+      if (path === '/api/conversations' && init?.method === 'POST') return json(conversation);
+      if (path === '/api/conversations/chat-one/messages') return new Response(body);
+      return undefined;
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.type(
+      screen.getByRole('textbox', { name: 'Message Pixel Station' }),
+      'Plan the next step',
+    );
+    await user.click(screen.getByRole('button', { name: 'Send message' }));
+    const enqueue = (event: Record<string, unknown>) =>
+      act(() => {
+        controller.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
+      });
+    enqueue({ type: 'token', content: 'Invalid partial response [read(path="notes.csv")]' });
+    expect(
+      await screen.findByText('Invalid partial response [read(path="notes.csv")]'),
+    ).toBeInTheDocument();
+    enqueue({ type: 'reset', detail: 'Retrying with a direct answer to your latest request.' });
+    expect(
+      await screen.findByText('Retrying with a direct answer to your latest request.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Invalid partial response/)).not.toBeInTheDocument();
+    expect(screen.getByText('Plan the next step')).toBeInTheDocument();
+    enqueue({ type: 'token', content: 'Here is the corrected plan.' });
+    expect(await screen.findByText('Here is the corrected plan.')).toBeInTheDocument();
+    expect(screen.queryByText(/Invalid partial response/)).not.toBeInTheDocument();
+    await act(async () => controller.close());
+  });
+
   it('submits Image Studio prompts directly to the image API with dimensions', async () => {
     let submitted: Record<string, unknown> | undefined;
     mockApi((path, init) => {
@@ -299,8 +338,9 @@ describe('workstation interactions', () => {
     expect(retries).toBe(2);
   });
 
-  it('offers compatible role models, keeps missing selections visible, and applies the installed Lite alias', async () => {
+  it('offers compatible role models, keeps missing selections visible, and applies the installed official Lite model', async () => {
     const alias = 'pixel-station-lfm2.5:2.6b';
+    const official = 'LiquidAI/lfm2.5-2.6b:latest';
     mockApi((path) => {
       if (path === '/api/models')
         return json({
@@ -308,6 +348,7 @@ describe('workstation interactions', () => {
           models: [
             { name: model, capabilities: ['completion'] },
             { name: alias, capabilities: ['completion', 'thinking'] },
+            { name: official, capabilities: ['completion', 'thinking'] },
             { name: 'qwen3-embedding:0.6b', capabilities: ['embedding'] },
             { name: 'vision-model', capabilities: ['vision', 'completion'] },
           ],
@@ -345,7 +386,7 @@ describe('workstation interactions', () => {
       }),
     ).toBeDisabled();
     await user.click(screen.getByRole('button', { name: /^Lite/ }));
-    expect(screen.getByRole('combobox', { name: /^primary chat/ })).toHaveValue(alias);
+    expect(screen.getByRole('combobox', { name: /^primary chat/ })).toHaveValue(official);
   });
 
   it('requests only the poker actions the deterministic engine exposes', async () => {

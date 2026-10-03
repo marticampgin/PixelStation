@@ -1,7 +1,9 @@
 import asyncio
 import base64
 import json
+import re
 import time
+from dataclasses import dataclass
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -10,7 +12,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .context import build_context
+from .context import approximate_tokens, build_context, clip, input_budget
 from .database import (
     AgentRun,
     Attachment,
@@ -181,36 +183,129 @@ async def stream_with_cancel(provider, model, messages, cancel_event):
             await iterator.aclose()
 
 
+@dataclass(frozen=True)
+class AnswerReset:
+    detail: str = "Retrying with a direct answer to your latest request."
+
+
+def answer_prose(content: str) -> str:
+    """Mask Markdown code and links while preserving offsets for streaming validation."""
+    masked = []
+    fence = None
+    for line in content.splitlines(keepends=True):
+        marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)", line)
+        if fence:
+            if (
+                marker
+                and marker[1][0] == fence[0]
+                and len(marker[1]) >= fence[1]
+                and not marker[2].strip()
+            ):
+                fence = None
+            masked.append(re.sub(r"[^\r\n]", " ", line))
+        elif marker:
+            fence = (marker[1][0], len(marker[1]))
+            masked.append(re.sub(r"[^\r\n]", " ", line))
+        else:
+            masked.append(line)
+    prose = "".join(masked)
+
+    def hide(match):
+        return re.sub(r"[^\r\n]", " ", match[0])
+
+    prose = re.sub(r"(`+).*?(?:\1(?!`)|\Z)", hide, prose, flags=re.DOTALL)
+    return re.sub(r"\[[^\]\n]*\](?:\([^\n]*?\)|\[[^\]\n]*\])", hide, prose)
+
+
+def unsupported_answer_protocol(prose: str, *, final: bool = False) -> bool:
+    if "<|tool_call" in prose:
+        return True
+    invocation = re.compile(
+        r"\[\s*(?:(?:functions|tools)\.)?(?:read|read_file|file_retrieve|write|write_file|file_create|file_edit|list_files|web_search|web_fetch|search|fetch|gmail_read|gmail_send|calendar_read|image_generate)\s*\([\s\S]*?\)\s*\](?![\[(])",
+        re.IGNORECASE,
+    )
+    # At the end of an unfinished stream, wait for a possible Markdown link destination.
+    return any(final or match.end() < len(prose) for match in invocation.finditer(prose))
+
+
+def safe_answer_cut(prose: str, emitted: int) -> int:
+    cut = len(prose)
+    brackets = []
+    for offset in range(emitted, len(prose)):
+        if prose[offset] == "[":
+            brackets.append(offset)
+        elif prose[offset] == "]" and brackets:
+            opening = brackets.pop()
+            if offset == len(prose) - 1:
+                cut = min(cut, opening)
+    if brackets:
+        cut = min(cut, brackets[0])
+    opening = prose.rfind("<", emitted)
+    if opening >= 0 and "<|tool_call".startswith(prose[opening:]):
+        cut = min(cut, opening)
+    return cut
+
+
+def repair_answer_context(settings, context: list[dict]) -> list[dict]:
+    """Replace the latest request with a bounded repair instruction, preserving its images."""
+    instruction = "Your attempted response requested an unavailable tool. Answer only the latest user request below, honoring its format and length constraints. Earlier requests and completed artifacts are historical context; do not continue them unless requested here. Supplied evidence has already been read. Do not call tools, emit bracket tool invocations, or claim new actions. If needed evidence is absent, say so.\n\nLATEST USER REQUEST:\n"
+    budget = input_budget(settings)
+    latest_index = next(
+        (index for index in range(len(context) - 1, -1, -1) if context[index]["role"] == "user"),
+        None,
+    )
+    latest = (
+        dict(context[latest_index]) if latest_index is not None else {"role": "user", "content": ""}
+    )
+    systems = []
+    system_remaining = budget - min(512, budget // 2)
+    for message in context:
+        if message["role"] == "system" and system_remaining > 6:
+            bounded = {**message, "content": clip(message["content"], system_remaining - 6)}
+            systems.append(bounded)
+            system_remaining -= approximate_tokens(bounded["content"]) + 6
+    remaining = budget - sum(approximate_tokens(message["content"]) + 6 for message in systems)
+    latest["content"] = instruction + clip(
+        latest["content"], remaining - approximate_tokens(instruction) - 8
+    )
+    remaining -= approximate_tokens(latest["content"]) + 6
+    history = []
+    for message in reversed(context[:latest_index] if latest_index is not None else []):
+        if message["role"] == "system":
+            continue
+        used = approximate_tokens(message["content"]) + 6
+        if used > remaining:
+            break
+        history.append(message)
+        remaining -= used
+    return [*systems, *reversed(history), latest]
+
+
 async def answer_stream(app, model, context, cancel_event, traces):
-    """Suppress native tool protocol and retry once with an explicit answer-only instruction."""
-    import re
+    """Validate throughout genuine streaming and replace a rejected attempt once."""
 
     for attempt in range(2):
-        prefix = ""
-        started_text = False
+        content = ""
+        emitted = 0
         unsupported = False
         stream = stream_with_cancel(app.state.llm, model, context, cancel_event)
         try:
             async for token in stream:
-                if not started_text:
-                    prefix += token
-                    if re.search(
-                        r"<\|tool_call[^>]*\|>|\[\s*(read_file|file_retrieve|web_search)\s*\(",
-                        prefix,
-                    ):
-                        unsupported = True
-                        break
-                    if prefix.lstrip() and (prefix.lstrip()[0] not in "<[`" or len(prefix) >= 96):
-                        started_text = True
-                        yield prefix
-                        prefix = ""
-                else:
-                    if "<|tool_call" in token:
-                        unsupported = True
-                        break
-                    yield token
-            if prefix and not unsupported:
-                yield prefix
+                content += token
+                if len(content) > 200000:
+                    raise RuntimeError("Response exceeded the output size limit")
+                prose = answer_prose(content)
+                if unsupported_answer_protocol(prose):
+                    unsupported = True
+                    break
+                cut = safe_answer_cut(prose, emitted)
+                if cut > emitted:
+                    yield content[emitted:cut]
+                    emitted = cut
+            if not unsupported:
+                unsupported = unsupported_answer_protocol(answer_prose(content), final=True)
+                if not unsupported and emitted < len(content):
+                    yield content[emitted:]
         except UnsupportedToolCall:
             unsupported = True
         finally:
@@ -218,17 +313,12 @@ async def answer_stream(app, model, context, cancel_event, traces):
         if not unsupported:
             return
         traces.append({"validation": "unsupported_tool_protocol", "retry": attempt + 1})
+        yield AnswerReset()
         if attempt == 1:
             raise RuntimeError(
                 "The local model returned a tool call instead of an answer after one retry. Try another model or ask a more specific question about the supplied excerpt."
             )
-        context = [
-            *context,
-            {
-                "role": "user",
-                "content": "The application already read the document and provided its text above. No tool calls are allowed. Answer the previous question directly from that evidence, in plain text. If the answer is absent, say so.",
-            },
-        ]
+        context = repair_answer_context(app.state.settings(), context)
 
 
 async def generate_response(
@@ -618,6 +708,10 @@ async def generate_response(
             )
             async with asyncio.timeout(180), app.state.model_queue.lock:
                 async for token in answer_stream(app, model, context, cancel_event, traces):
+                    if isinstance(token, AnswerReset):
+                        result_content = ""
+                        yield ndjson({"type": "reset", "detail": token.detail})
+                        continue
                     result_content += token
                     yield ndjson({"type": "token", "content": token})
                     if len(result_content) > 200000:

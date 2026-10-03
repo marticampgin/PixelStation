@@ -207,6 +207,10 @@ export function useStation() {
             },
         controller.signal,
         (event) => {
+          if (event.type === 'reset') {
+            setStreaming('');
+            setStatus(String(event.detail ?? 'Preparing a corrected response…'));
+          }
           if (event.type === 'token') {
             setStatus('');
             setStreaming((previous) => previous + (event.content ?? ''));

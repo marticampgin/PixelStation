@@ -1,13 +1,12 @@
-# Local alias only: reuses the installed HF weights and inherited stop parameters.
-# Create with: ollama create pixel-station-lfm2.5:2.6b -f config/ollama-lite.Modelfile
-# Keep tool/think branches so Ollama 0.32.14 selects this native Go template.
+# Optional local alias using the installed Hugging Face weight blob.
+# Requires Ollama with the native lfm2-thinking renderer/parser (verified 0.32.14).
+# Prefer the official LiquidAI/lfm2.5-2.6b registry model for fresh installs.
+# Recreate an older alias with:
+# ollama create pixel-station-lfm2.5:2.6b -f config/ollama-lite.Modelfile
 FROM hf.co/LiquidAI/LFM2.5-2.6B-GGUF:Q4_K_M
-
-TEMPLATE """<|startoftext|>{{ if or .System .Tools }}<|im_start|>system
-{{ .System }}{{ if .Tools }}
-List of tools: {{ json .Tools }}{{ end }}<|im_end|>
-{{ end }}{{ range .Messages }}<|im_start|>{{ .Role }}
-{{ if eq .Role "assistant" }}{{ if .Thinking }}<think>{{ .Thinking }}</think>{{ end }}{{ .Content }}{{ if .ToolCalls }}<|tool_call_start|>[{{ range $i, $call := .ToolCalls }}{{ if $i }}, {{ end }}{{ $call.Function.Name }}({{ $separator := "" }}{{ range $key, $value := $call.Function.Arguments.ToMap }}{{ $separator }}{{ $key }}={{ json $value }}{{ $separator = ", " }}{{ end }}){{ end }}]<|tool_call_end|>{{ end }}{{ else if eq .Role "tool" }}{{ .Content }}{{ else }}{{ .Content }}{{ end }}<|im_end|>
-{{ end }}<|im_start|>assistant
-{{ if .Think }}<think>{{ else }}<think></think>
-{{ end }}"""
+RENDERER lfm2-thinking
+PARSER lfm2-thinking
+TEMPLATE "{{ .Prompt }}"
+PARAMETER temperature 0.1
+PARAMETER top_k 50
+PARAMETER repeat_penalty 1.1

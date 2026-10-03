@@ -6,6 +6,8 @@ from typing import Any, Protocol
 import httpx
 from pydantic import BaseModel
 
+from .reasoning import ReasoningFilter, public_structured_content
+
 
 class LLMProvider(Protocol):
     async def models(self) -> dict: ...
@@ -128,7 +130,7 @@ class OllamaProvider:
             return {
                 "available": False,
                 "models": [],
-                "error": f"Ollama unavailable: {exc}. Start Ollama and run ollama pull hf.co/LiquidAI/LFM2.5-2.6B-GGUF:Q4_K_M",
+                "error": f"Ollama unavailable: {exc}. Start Ollama and run ollama pull LiquidAI/lfm2.5-2.6b",
             }
 
     async def _require_local_model(self, model: str) -> None:
@@ -170,6 +172,7 @@ class OllamaProvider:
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(180, connect=5), trust_env=False
         ) as client:
+            public_content = ReasoningFilter()
             async with client.stream(
                 "POST", f"{settings.ollama_url}/api/chat", json=payload
             ) as response:
@@ -189,7 +192,10 @@ class OllamaProvider:
                             "The model requested a tool during answer synthesis"
                         )
                     if content := chunk.get("message", {}).get("content"):
-                        yield content
+                        if visible := public_content.feed(content):
+                            yield visible
+                if visible := public_content.finish():
+                    yield visible
 
     async def structured(
         self, model: str, messages: list[dict], schema: type[BaseModel], **kwargs
@@ -223,7 +229,9 @@ class OllamaProvider:
                 )
                 response.raise_for_status()
                 try:
-                    return schema.model_validate_json(response.json()["message"]["content"])
+                    return schema.model_validate_json(
+                        public_structured_content(response.json()["message"]["content"])
+                    )
                 except (ValueError, KeyError) as exc:
                     if attempt == validation_retries:
                         raise OllamaError(

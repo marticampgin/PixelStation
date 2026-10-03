@@ -12,6 +12,12 @@ export function acceptsRole(model: Model, role: string) {
 }
 
 export function preferredLiteModel(models: Model[]) {
+  const official = models.find(
+    (model) =>
+      (model.name === liteModel || model.name === `${liteModel}:latest`) &&
+      acceptsRole(model, 'primary_chat'),
+  );
+  if (official) return official.name;
   return models.some((model) => model.name === liteAlias && acceptsRole(model, 'primary_chat'))
     ? liteAlias
     : liteModel;

@@ -30,4 +30,22 @@ describe('model routing capabilities', () => {
     );
     expect(modelLabel(liteAlias)).not.toBe(modelLabel(imported.name));
   });
+
+  it('prefers the installed official name over a coinstalled alias only when it supports completion', () => {
+    const alias = { name: liteAlias, capabilities: ['completion'] };
+    const taggedOfficial = {
+      name: `${liteModel}:latest`,
+      capabilities: ['completion', 'thinking'],
+    };
+    expect(preferredLiteModel([alias, taggedOfficial])).toBe(taggedOfficial.name);
+    expect(preferredLiteModel([alias, { name: liteModel, capabilities: ['completion'] }])).toBe(
+      liteModel,
+    );
+    expect(preferredLiteModel([alias, { ...taggedOfficial, capabilities: ['embedding'] }])).toBe(
+      liteAlias,
+    );
+    expect(preferredLiteModel([{ ...taggedOfficial, capabilities: ['embedding'] }])).toBe(
+      liteModel,
+    );
+  });
 });

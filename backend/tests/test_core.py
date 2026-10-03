@@ -9,6 +9,7 @@ from sqlalchemy import select, text
 
 from pixel_station.app import create_app
 from pixel_station.chat import (
+    AnswerReset,
     MessageInput,
     generate_response,
     stream_with_cancel,
@@ -763,6 +764,7 @@ async def test_unsupported_tool_protocol_retries_without_emitting_it(app):
                 asyncio.Event(),
                 traces,
             )
+            if isinstance(value, str)
         ]
     )
     assert answer == "The code is violet-42."
@@ -779,9 +781,158 @@ async def test_unsupported_tool_protocol_retries_without_emitting_it(app):
 
     app.state.llm.stream = native
     answer = "".join(
-        [value async for value in answer_stream(app, "local", [], asyncio.Event(), [])]
+        [
+            value
+            async for value in answer_stream(app, "local", [], asyncio.Event(), [])
+            if isinstance(value, str)
+        ]
     )
     assert "violet-42" in answer and attempts == 2
+
+
+def test_late_bracket_call_resets_stream_and_persisted_answer_to_latest_request(client, app):
+    cid = client.post("/api/conversations", json={}).json()["id"]
+    events(client.post(f"/api/conversations/{cid}/messages", json={"content": "Create a CSV file"}))
+    latest = "Draft a three-step plan for organizing a local project folder. Keep each step under 15 words."
+    repaired = "1. Group related files.\n2. Name folders consistently.\n3. Archive unused items."
+    attempts = []
+
+    async def stream(model, messages, **kwargs):
+        attempts.append(messages)
+        if len(attempts) == 1:
+            yield "I'll create the CSV file and verify it was created.\n\n"
+            yield "[re"
+            yield "ad(path='/api/files/previous/content/functionality-check.csv')"
+            yield "]"
+        else:
+            assert latest in messages[-1]["content"]
+            assert (
+                "Earlier requests and completed artifacts are historical context"
+                in messages[-1]["content"]
+            )
+            yield repaired[:24]
+            yield repaired[24:]
+
+    app.state.llm.stream = stream
+    response = events(client.post(f"/api/conversations/{cid}/messages", json={"content": latest}))
+    reset_index = next(index for index, event in enumerate(response) if event["type"] == "reset")
+    assert any(event["type"] == "token" for event in response[:reset_index])
+    assert len(attempts) == 2
+    assert "latest user request" in attempts[0][0]["content"]
+    final = response[-1]["message"]
+    assert final["status"] == "complete"
+    assert final["content"] == repaired
+    assert "[read(" not in "".join(event.get("content", "") for event in response)
+    saved = client.get(f"/api/conversations/{cid}").json()["messages"][-1]
+    assert saved["content"] == repaired
+
+
+@pytest.mark.parametrize(
+    "example",
+    [
+        "Example: `[read(path='notes.txt')]` is illustrative code.",
+        "Example:\n```python\n[read(path='notes.txt')]\n```\nThis is a code sample.",
+        "~~~text\n<|tool_call_start|>[read_file(path='notes.txt')]\n~~~\nAn example only.",
+        "[read(path='notes.txt')](https://example.com/reference) is a documentation link.",
+        "[read(path='notes.txt')][reference]\n\n[reference]: https://example.com/reference",
+        "An ordinary list: [one, two].",
+    ],
+)
+async def test_tool_protocol_validator_allows_code_examples_and_links(app, example):
+    from pixel_station.chat import answer_stream
+
+    calls = 0
+
+    async def stream(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        # Single-character chunks cover partial fence, link, and invocation boundaries.
+        for character in example:
+            yield character
+
+    app.state.llm.stream = stream
+    pieces = [piece async for piece in answer_stream(app, "local", [], asyncio.Event(), [])]
+    assert all(isinstance(piece, str) for piece in pieces)
+    assert "".join(pieces) == example
+    assert calls == 1
+
+
+async def test_repeated_late_tool_calls_stop_after_one_repair_and_reset_both_attempts(app):
+    from pixel_station.chat import answer_stream
+
+    calls = 0
+
+    async def stream(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        yield "I will inspect the file. "
+        yield "[read(path='notes.txt')]"
+
+    app.state.llm.stream = stream
+    pieces = []
+    with pytest.raises(RuntimeError, match="after one retry"):
+        async for piece in answer_stream(app, "local", [], asyncio.Event(), []):
+            pieces.append(piece)
+    assert calls == 2
+    assert sum(isinstance(piece, AnswerReset) for piece in pieces) == 2
+    assert not any("[read(" in piece for piece in pieces if isinstance(piece, str))
+
+
+async def test_answer_validation_preserves_genuine_streaming(app):
+    from pixel_station.chat import answer_stream
+
+    release = asyncio.Event()
+
+    async def stream(*args, **kwargs):
+        yield "First sentence. "
+        await release.wait()
+        yield "Second sentence."
+
+    app.state.llm.stream = stream
+    response = answer_stream(app, "local", [], asyncio.Event(), [])
+    assert await asyncio.wait_for(anext(response), timeout=1) == "First sentence. "
+    release.set()
+    assert "".join([piece async for piece in response]) == "Second sentence."
+
+
+async def test_repair_context_preserves_images_and_stays_within_large_request_budget(app):
+    from pixel_station.chat import answer_stream
+    from pixel_station.context import approximate_tokens, input_budget
+
+    settings = app.state.settings()
+    settings.context_tokens = 2048
+    app.state.set_settings(settings)
+    context, _ = build_context(
+        settings,
+        [
+            {"role": "user", "content": "An earlier artifact task " * 100},
+            {"role": "assistant", "content": "The artifact is complete " * 100},
+            {
+                "role": "user",
+                "content": "Describe this image. " + "Additional request details " * 1000,
+            },
+        ],
+    )
+    context[-1]["images"] = ["fixture-image"]
+    calls = []
+
+    async def stream(model, messages, **kwargs):
+        calls.append(messages)
+        if len(calls) == 1:
+            yield "[read(path='previous.csv')]"
+        else:
+            yield "A direct answer."
+
+    app.state.llm.stream = stream
+    pieces = [piece async for piece in answer_stream(app, "local", context, asyncio.Event(), [])]
+    assert "".join(piece for piece in pieces if isinstance(piece, str)) == "A direct answer."
+    repaired = calls[-1]
+    assert sum(approximate_tokens(message["content"]) + 6 for message in repaired) <= input_budget(
+        settings
+    )
+    assert repaired[-1]["images"] == ["fixture-image"]
+    assert "LATEST USER REQUEST:\nDescribe this image." in repaired[-1]["content"]
+    assert sum(message["role"] == "user" for message in repaired) == 1
 
 
 def test_memory_workspace_search_uses_local_query_embedding(client, app):

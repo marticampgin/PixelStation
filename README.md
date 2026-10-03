@@ -32,7 +32,7 @@ ollama pull LiquidAI/lfm2.5-2.6b
 ollama pull qwen3-embedding:0.6b
 ```
 
-The [official LiquidAI registry model](https://ollama.com/LiquidAI/lfm2.5-2.6b) includes Ollama's LFM renderer and parser. Model names and capabilities are discovered rather than assumed. Settings provides recommended profiles:
+The [official LiquidAI registry model](https://ollama.com/LiquidAI/lfm2.5-2.6b) includes Ollama's native LFM renderer and parser. Lite prefers its discovered installed name, including the `:latest` tag. Model names and capabilities are discovered rather than assumed. Settings provides recommended profiles:
 
 | Profile | Chat | Embedding | Default context |
 | --- | --- | --- | --- |
@@ -42,13 +42,13 @@ The [official LiquidAI registry model](https://ollama.com/LiquidAI/lfm2.5-2.6b) 
 
 Profiles configure roles and context; they do not silently download models. Optional Lite vision: `qwen3.5:2b`. Start with Lite on an 8 GB RAM machine. Image generation and large context windows compete with chat for memory. The launcher sets `OLLAMA_NO_CLOUD=1` when starting Ollama; the backend also rejects cloud inference and limits the Ollama endpoint to loopback.
 
-If you already have the Hugging Face import `hf.co/LiquidAI/LFM2.5-2.6B-GGUF:Q4_K_M`, its embedded template can force thinking even when disabled. On the development machine this exhausted structured-output budgets. The included [Modelfile](config/ollama-lite.Modelfile) creates a local alias with a conditional template, reusing the existing weight blob:
+If you already have the Hugging Face import `hf.co/LiquidAI/LFM2.5-2.6B-GGUF:Q4_K_M`, its embedded template can force thinking even when disabled. On the development machine this exhausted structured-output budgets. The included [Modelfile](config/ollama-lite.Modelfile) provides an optional alias reusing the existing weight blob:
 
 ```powershell
 ollama create pixel-station-lfm2.5:2.6b -f config/ollama-lite.Modelfile
 ```
 
-Assign the alias to the chat, planner, router, summarizer, memory extractor and critic roles. The Lite preset prefers it when installed. Native chat and 150-token Poker decisions were verified with this alias on Ollama 0.32.14. It requires no additional weight download and leaves the original model available.
+Prefer the official registry model for chat and structured roles. A live follow-up after CSV creation exposed incorrect historical-task continuation with the earlier alias template; the official model answered the new planning request correctly. The alias now uses the same native renderer/parser rather than a handwritten chat template; real schema-constrained CSV output was verified on Ollama 0.32.14. Recreate any existing alias after Modelfile changes. The original import remains available.
 
 ## Workspaces
 

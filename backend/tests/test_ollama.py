@@ -1,4 +1,6 @@
+import asyncio
 import json
+import time
 
 import httpx
 import pytest
@@ -127,3 +129,148 @@ async def test_native_embedding_api(ollama):
         "/api/embed",
         {"model": "local:latest", "input": ["private text"], "keep_alive": "0"},
     )
+
+
+@pytest.fixture
+def content_ollama(monkeypatch):
+    original_client = httpx.AsyncClient
+
+    def create(*, chunks=None, structured_content="", wire_stream=None):
+        requests = []
+
+        def handle(request):
+            payload = json.loads(request.content)
+            requests.append(payload)
+            if payload["stream"]:
+                if wire_stream:
+                    return httpx.Response(200, stream=wire_stream)
+                return httpx.Response(
+                    200,
+                    content="\n".join(
+                        json.dumps(
+                            {
+                                "message": {
+                                    "content": content,
+                                    "thinking": "private separate reasoning",
+                                }
+                            }
+                        )
+                        for content in chunks
+                    )
+                    + "\n",
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "message": {
+                        "content": structured_content,
+                        "thinking": "private separate reasoning",
+                    }
+                },
+            )
+
+        transport = httpx.MockTransport(handle)
+        monkeypatch.setattr(
+            httpx,
+            "AsyncClient",
+            lambda **kwargs: original_client(transport=transport, timeout=kwargs.get("timeout")),
+        )
+        settings = AppSettings()
+        provider = OllamaProvider(lambda: settings)
+        provider._cache[settings.ollama_url] = (
+            time.monotonic(),
+            {
+                "available": True,
+                "models": [{"name": "local:latest", "capabilities": ["completion", "thinking"]}],
+            },
+        )
+        return provider, requests
+
+    return create
+
+
+@pytest.mark.parametrize("tag", ["think", "thinking", "reasoning", "analysis"])
+async def test_inline_reasoning_tags_split_across_chunks_never_reach_output(content_ollama, tag):
+    text = f"<{tag}>private chain of thought</{tag}>Public answer."
+    provider, _ = content_ollama(chunks=list(text))
+    result = "".join([part async for part in provider.stream("local:latest", [])])
+    assert result == "Public answer."
+
+
+@pytest.mark.parametrize(
+    "content,expected",
+    [
+        ("Visible before <think>private unfinished reasoning", "Visible before "),
+        ("<reasoning>private unfinished reasoning", ""),
+        ("<thi", ""),
+        ("<think>outer <analysis>inner</analysis> still private</think>Public", "Public"),
+        ("<THINK>private</THINK>Public", "Public"),
+        (
+            "2 < 3; <em>ordinary HTML</em> is preserved.",
+            "2 < 3; <em>ordinary HTML</em> is preserved.",
+        ),
+    ],
+)
+async def test_unterminated_channels_drop_and_ordinary_text_survives(
+    content_ollama, content, expected
+):
+    provider, _ = content_ollama(chunks=list(content))
+    assert "".join([part async for part in provider.stream("local:latest", [])]) == expected
+
+
+@pytest.mark.parametrize(
+    "example",
+    [
+        "The literal tag is `<think>example</think>`.",
+        "Example:\n```xml\n<think>example</think>\n```\nDescription.",
+        "~~~xml\n<reasoning>example</reasoning>\n~~~\nDescription.",
+        "Use ``<analysis>example</analysis>`` in sample markup.",
+    ],
+)
+async def test_reasoning_filter_preserves_markdown_code_examples(content_ollama, example):
+    provider, _ = content_ollama(chunks=list(example))
+    assert "".join([part async for part in provider.stream("local:latest", [])]) == example
+
+
+async def test_provider_still_streams_public_text_before_response_completes(content_ollama):
+    release = asyncio.Event()
+
+    class LiveStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'{"message":{"content":"Public first sentence. "}}\n'
+            await release.wait()
+            yield b'{"message":{"content":"<thi"}}\n'
+            yield b'{"message":{"content":"nk>private</think>Public second sentence."}}\n'
+
+    provider, _ = content_ollama(wire_stream=LiveStream())
+    stream = provider.stream("local:latest", [])
+    assert await asyncio.wait_for(anext(stream), timeout=1) == "Public first sentence. "
+    release.set()
+    assert "".join([part async for part in stream]) == "Public second sentence."
+
+
+async def test_structured_json_filters_external_reasoning_before_schema_validation(content_ollama):
+    provider, requests = content_ollama(
+        structured_content='<think>private reasoning</think>{"value":3}<reasoning>private suffix</reasoning>'
+    )
+    assert (await provider.structured("local:latest", [], Output)).value == 3
+    assert len(requests) == 1
+
+
+async def test_structured_literal_json_strings_are_not_reasoning_channels(content_ollama):
+    class LiteralOutput(BaseModel):
+        content: str
+
+    example = 'Use <think>example</think> as literal markup, including "quotes".'
+    provider, _ = content_ollama(
+        structured_content="<reasoning>private</reasoning>" + json.dumps({"content": example})
+    )
+    assert (await provider.structured("local:latest", [], LiteralOutput)).content == example
+
+
+async def test_unterminated_structured_reasoning_cannot_appear_in_validation_error(content_ollama):
+    provider, requests = content_ollama(structured_content="<think>private chain of thought")
+    with pytest.raises(OllamaError) as error:
+        await provider.structured("local:latest", [], Output)
+    assert "private chain of thought" not in str(error.value)
+    assert len(requests) == 2
