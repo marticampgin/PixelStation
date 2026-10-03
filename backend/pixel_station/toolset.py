@@ -8,6 +8,7 @@ from .indexing import embed_query
 from .integrations import EmailInput, EventInput
 from .memory import MemoryInput, create_memory, search_memory
 from .orchestration import Tool, ToolRegistry
+from .providers.comfy import MEMORY_RELEASE_TIMEOUT, REMOTE_CLEANUP_TIMEOUT
 
 
 class Query(BaseModel):
@@ -115,7 +116,8 @@ def build_tools(app) -> ToolRegistry:
     register("web_search", "web", Query, services.web.search)
     register("web_fetch", "web", URL, services.web.fetch)
     register(
-        "image_generate", "images", ImagePrompt, services.images.generate, "local_reversible", 180
+        "image_generate", "images", ImagePrompt, services.images.generate, "local_reversible",
+        services.images.timeout + REMOTE_CLEANUP_TIMEOUT + MEMORY_RELEASE_TIMEOUT,
     )
     register("memory_query", "memory", Query, query_memories)
     register("memory_write", "memory", MemoryInput, save_memory, "local_reversible")

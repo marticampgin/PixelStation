@@ -21,9 +21,27 @@ from PIL import Image
 
 from .web import IntegrationError, endpoint_url
 
+REMOTE_CLEANUP_TIMEOUT = 15
+MEMORY_RELEASE_TIMEOUT = 15
+
 
 def now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _valid_dimension(value: Any) -> bool:
+    return type(value) is int and 256 <= value <= 2048 and value % 8 == 0
+
+
+def _workflow_dimensions(workflow: dict[str, Any], bindings: dict[str, Any]) -> dict[str, int]:
+    defaults = {}
+    for key in ("width", "height"):
+        binding = bindings.get(key, {})
+        inputs = workflow.get(str(binding.get("node", "")), {}).get("inputs", {})
+        value = inputs.get(binding.get("input"))
+        if _valid_dimension(value):
+            defaults[key] = value
+    return defaults
 
 
 class ComfyImageProvider:
@@ -73,8 +91,17 @@ class ComfyImageProvider:
 
     def workflows(self) -> list[dict[str, Any]]:
         with self.db() as db:
-            rows = db.execute("SELECT id,name,bindings,created_at FROM workflows ORDER BY created_at DESC").fetchall()
-        return [{**dict(row), "bindings": json.loads(row["bindings"])} for row in rows]
+            rows = db.execute("SELECT id,name,workflow,bindings,created_at FROM workflows ORDER BY created_at DESC").fetchall()
+        result = []
+        for row in rows:
+            workflow, bindings = json.loads(row["workflow"]), json.loads(row["bindings"])
+            defaults = _workflow_dimensions(workflow, bindings)
+            record = {key: value for key, value in dict(row).items() if key != "workflow"}
+            record["bindings"] = bindings
+            if defaults:
+                record["defaults"] = defaults
+            result.append(record)
+        return result
 
     def import_workflow(self, name: str, workflow: dict[str, Any], bindings: dict[str, Any]) -> dict[str, Any]:
         if not name.strip() or len(name) > 120 or not workflow or len(json.dumps(workflow)) > 2_000_000:
@@ -110,15 +137,20 @@ class ComfyImageProvider:
         return json.loads(row[0]), json.loads(row[1])
 
     async def start_generation(self, prompt: str, workflow_id: str | None = None, seed: int | None = None,
-                               width: int = 512, height: int = 512) -> dict[str, Any]:
+                               width: int | None = None, height: int | None = None) -> dict[str, Any]:
         endpoint = self.endpoint()
         if not endpoint:
             raise IntegrationError("Configure and start ComfyUI before generating images.", "comfyui_missing")
         endpoint = endpoint_url(endpoint)
-        if not prompt.strip() or len(prompt) > 10_000 or not 256 <= width <= 2048 or not 256 <= height <= 2048 or width % 8 or height % 8:
+        if not prompt.strip() or len(prompt) > 10_000 or any(
+            value is not None and not _valid_dimension(value) for value in (width, height)
+        ):
             raise IntegrationError("Use a prompt under 10,000 characters and dimensions from 256–2048 in multiples of 8.", "invalid_generation", 422)
         workflow_id = workflow_id or self.default_workflow()
-        self._workflow(workflow_id)
+        workflow, bindings = self._workflow(workflow_id)
+        defaults = _workflow_dimensions(workflow, bindings)
+        width = defaults.get("width", 512) if width is None else width
+        height = defaults.get("height", 512) if height is None else height
         seed = secrets.randbelow(2**53) if seed is None else seed
         if not 0 <= seed < 2**53:
             raise IntegrationError("Seed must be from 0 to 2^53-1.", "invalid_seed", 422)
@@ -305,7 +337,7 @@ class ComfyImageProvider:
 
     async def _cleanup(self, id_: str, base: str, prompt_id: str) -> bool:
         try:
-            async with asyncio.timeout(15), httpx.AsyncClient(
+            async with asyncio.timeout(REMOTE_CLEANUP_TIMEOUT), httpx.AsyncClient(
                 timeout=10, transport=self.transport, trust_env=False
             ) as client:
                 await self._cancel_remote(client, base, prompt_id)
@@ -340,7 +372,7 @@ class ComfyImageProvider:
             ]
 
         try:
-            async with asyncio.timeout(15), httpx.AsyncClient(
+            async with asyncio.timeout(MEMORY_RELEASE_TIMEOUT), httpx.AsyncClient(
                 timeout=5, transport=self.transport, trust_env=False
             ) as client:
                 response = await client.get(base + "/queue")

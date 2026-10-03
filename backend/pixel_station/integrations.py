@@ -66,8 +66,8 @@ class GenerationInput(Input):
     prompt: str = Field(min_length=1, max_length=10_000)
     workflow_id: str | None = None
     seed: int | None = Field(default=None, ge=0, lt=2**53)
-    width: int = Field(default=512, ge=256, le=2048)
-    height: int = Field(default=512, ge=256, le=2048)
+    width: int | None = Field(default=None, ge=256, le=2048)
+    height: int | None = Field(default=None, ge=256, le=2048)
 
 
 class CredentialsInput(Input):

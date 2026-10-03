@@ -39,4 +39,34 @@ Fresh residency observations showed the real LFM model unloaded before image sub
 
 During native QA, a separate pytest import exposed a recovery-isolation bug that could mark a live job interrupted. Test collection now redirects the global application to an owned temporary directory before importing it. The regression and complete isolated suite pass. Runtime failure records and temporary captures remain outside Git.
 
+### Selectable DreamShaper 8 and SDXL profiles
+
+Original DreamShaper 8 and SDXL Base 1.0 checkpoints were installed alongside SD-Turbo. Pinned revisions, complete SHA-256 hashes, exact filenames and companion-document verification are recorded in [the integration guide](INTEGRATIONS.md#comfyui-on-windows). Both profiles use core ComfyUI nodes, DPM++ 2M/Karras, 28 steps, batch size one and denoise 1.0. DreamShaper uses CFG 6.5 at 512 × 512; SDXL uses CFG 5.5 at 1024 × 1024 with tiled VAE decoding. The same low-VRAM launcher settings were retained.
+
+| First recorded job | Result | ComfyUI execution time |
+| --- | --- | --- |
+| DreamShaper 8, 512 × 512 | Completed PNG, no execution error | 14.15 seconds |
+| SDXL Base 1.0, 1024 × 1024 | Completed PNG, no execution error | 49.55 seconds |
+
+The first SDXL interval from job creation to saved artifact was approximately 50.62 seconds. The first DreamShaper pixel-art sample placed the fox indoors and framed the cabin; the first SDXL sample followed the requested outdoor fox/cabin placement more closely.
+
+The second pair used seed `4242` and the same photographic prompt: “A photograph of one red fox standing on moss at the edge of a pine forest, soft overcast daylight, natural fur, realistic proportions, wildlife photography.” Sampling settings and each profile's dimensions remained unchanged.
+
+| Second photographic job | ComfyUI execution | Job creation → saved artifact | Monitoring |
+| --- | --- | --- | --- |
+| DreamShaper 8, 512 × 512 | 23.78 seconds | 24.66 seconds | 5 samples, five-second intervals |
+| SDXL Base 1.0, 1024 × 1024 | 125.69 seconds | 127.63 seconds | 26 samples, five-second intervals, including active generation |
+
+Visual inspection of both PNGs found detailed photographic fur in the DreamShaper image, with unusual hind legs and watermark-like text at the lower left. The SDXL sample showed a sharp, natural-looking fox. These observations cover individual prompt/seed cases at different resolutions; they do not establish a general quality ranking. Likewise, the four timings are individual jobs rather than a repeatable performance benchmark; queueing, checkpoint loading, paging and later prompts can change latency.
+
+Monitoring missed the first SDXL job, so no sampled first-job RAM or VRAM peak is claimed. Its initial process-lifetime peak private allocation was approximately 17.9 GB. During the second SDXL job, the sampled maximum ComfyUI-reported Torch pool was **5,838,471,168 bytes**, sampled maximum process private allocation was **17,972,326,400 bytes**, and minimum sampled system available memory was **2,719,744 bytes**. Five-second sampling can miss short peaks. The Torch pool is not total device VRAM, and private allocation is virtual memory rather than physical RAM or a working-set measurement. These observations indicate heavy memory pressure and reliance on Windows paging on this 8 GB RAM/6 GB VRAM machine. Tiled VAE decoding does not remove checkpoint, text-encoder or denoising memory requirements.
+
+All four new native Studio jobs completed with no recorded error, no remote-cleanup requirement and no handoff warning. ComfyUI reported a 33,554,432-byte Torch pool at termination; `/free` acknowledged the request without a further observed reduction because the reported allocation had already fallen before the request. The launcher uses `--cache-none` to avoid retaining intermediate node results between these jobs. The counters and acknowledgement do not claim that all device memory was free.
+
+SDXL was selected as the quality default through Studio and retained after an app restart. A fifth native job came from a real Chrome chat request without structured dimensions: “Generate an image of a tiny orange fox outside a wooden cabin at dusk, blue pine forest, pixel art.” The persisted request and PNG were 1024 × 1024 using SDXL, with no error, cleanup requirement or handoff warning. ComfyUI execution took 122.15 seconds; creation to saved artifact was 124.05 seconds. The random-seed output placed an oversized fox on the cabin roof, a scale/placement defect despite successful execution. This is a routing/dimension/execution check, not a quality pass. Mocked regressions verify the 630-second default image orchestration budget and alignment with a custom provider deadline; this native job did not exercise a duration beyond the old 180-second limit.
+
+After restart, Studio restored the prior DreamShaper job at 512 × 512 and seed 4242 despite the new global default. Explicitly selecting SDXL applied 1024 × 1024. The SDXL photographic library download matched the saved PNG's SHA-256. A fresh Chrome tab showed both distinct forest URLs, the source-specific LiquidAI labels and exact selected-model IDs, with no console warnings/errors or horizontal overflow at the native 1920-pixel viewport. The right forest drawer was also inspected at 390 × 844. Its public asset/tool/prompt provenance is recorded in [ASSETS](design/ASSETS.md); temporary QA screenshots and generated runtime images remain outside Git.
+
+Final isolated verification: 363 backend tests and 64 frontend tests passed, with Ruff, all 29 backend mypy source files, frontend type/build/format checks and ComfyUI launcher syntax passing. SD-Turbo remains installed and all three profiles remain selectable.
+
 Web research and live Gmail/Calendar operations still require their separate setup and remain unverified end to end. WSL and Docker are absent; administrator WSL enablement and restart precede SearXNG. Google still needs owner-created Desktop OAuth credentials and personal consent. Bundled interface art was created with Codex's Image Gen tool; the native checks above independently verify the application's ComfyUI adapter.

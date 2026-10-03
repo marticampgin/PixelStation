@@ -23,6 +23,7 @@ $comfyArgs = @(
     '--port', '8188',
     '--disable-auto-launch',
     '--disable-api-nodes',
+    '--cache-none',
     '--lowvram',
     '--disable-dynamic-vram'
 )

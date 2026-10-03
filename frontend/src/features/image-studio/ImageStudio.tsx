@@ -40,51 +40,81 @@ export function ImageStudio({ station }: { station: Station }) {
   const [workflowDelete, setWorkflowDelete] = useState(false);
   const [selected, setSelected] = useState<GeneratedImage | null>(null);
   const workflowFile = useRef<HTMLInputElement>(null);
-  async function load() {
+  const workflowChoice = useRef('');
+  const customDimensions = useRef(false);
+  const formEdited = useRef(false);
+  function selectWorkflow(id: string) {
+    formEdited.current = true;
+    customDimensions.current = false;
+    workflowChoice.current = id;
+    setWorkflow(id);
+    applyDimensions(workflows.find((item) => item.id === id)?.defaults);
+  }
+  function applyDimensions(defaults: Workflow['defaults']) {
+    if (defaults?.width != null) setWidth(defaults.width);
+    if (defaults?.height != null) setHeight(defaults.height);
+  }
+  async function load(restoreJobId?: string | null, isActive = () => true) {
     const results = await Promise.allSettled([
       request<IntegrationStatus>('/images/status'),
       request<{ workflows: Workflow[]; default_workflow: string }>('/images/workflows'),
       request<{ images: GeneratedImage[] }>('/images/library'),
+      restoreJobId ? request<ImageJob>(`/images/jobs/${restoreJobId}`) : Promise.resolve(null),
     ]);
+    if (!isActive()) return;
+    const restoredResult = results[3];
+    if (restoredResult.status === 'fulfilled' && restoredResult.value) {
+      const restored = restoredResult.value;
+      const image = ['complete', 'completed'].includes(restored.status)
+        ? restored.images[0]
+        : undefined;
+      setJob(restored);
+      if (image) setSelected(image);
+      if (!formEdited.current) {
+        const previous = image ?? restored;
+        if (previous.prompt != null) setPrompt(previous.prompt);
+        if (previous.seed != null) setSeed(String(previous.seed));
+        if (previous.width != null || previous.height != null) {
+          applyDimensions(previous);
+          customDimensions.current = true;
+        }
+        if (previous.workflow_id) {
+          workflowChoice.current = previous.workflow_id;
+          setWorkflow(previous.workflow_id);
+        }
+      }
+      if (restored.error) setError(restored.error);
+    } else if (restoredResult.status === 'rejected') {
+      if (restoredResult.reason.status === 404) setSavedJobId(null);
+      else setError(errorMessage(restoredResult.reason));
+    }
     if (results[0].status === 'fulfilled') setStatus(results[0].value);
     if (results[1].status === 'fulfilled') {
-      setWorkflows(results[1].value.workflows);
-      setDefaultWorkflow(results[1].value.default_workflow);
-      setWorkflow(
-        (previous) =>
-          previous ||
-          (results[1].status === 'fulfilled' &&
-            (results[1].value.default_workflow || results[1].value.workflows[0]?.id)) ||
-          '',
-      );
+      const available = results[1].value;
+      setWorkflows(available.workflows);
+      setDefaultWorkflow(available.default_workflow);
+      if (!workflowChoice.current) {
+        const initial =
+          available.workflows.find((item) => item.id === available.default_workflow) ??
+          available.workflows[0];
+        if (initial) {
+          workflowChoice.current = initial.id;
+          setWorkflow(initial.id);
+          if (!customDimensions.current) applyDimensions(initial.defaults);
+        }
+      }
     }
     if (results[2].status === 'fulfilled') setImages(results[2].value.images);
-    const failed = results.find((result) => result.status === 'rejected');
+    const failed = results.slice(0, 3).find((result) => result.status === 'rejected');
     if (failed?.status === 'rejected') setError(errorMessage(failed.reason));
   }
   useEffect(() => {
-    void load();
-  }, []);
-  useEffect(() => {
-    if (!savedJobId) return;
+    // Load workflow defaults and the saved job together so restoration takes precedence.
     let active = true;
-    request<ImageJob>(`/images/jobs/${savedJobId}`)
-      .then((restored) => {
-        if (!active) return;
-        setJob(restored);
-        if (['complete', 'completed'].includes(restored.status))
-          setSelected(restored.images[0] ?? null);
-        if (restored.error) setError(restored.error);
-      })
-      .catch((err) => {
-        if (!active) return;
-        if (err.status === 404) setSavedJobId(null);
-        else setError(errorMessage(err));
-      });
+    void load(savedJobId, () => active);
     return () => {
       active = false;
     };
-    // Restore the last server-owned job once when this workspace opens.
   }, []);
   function trackJob(next: ImageJob) {
     setSavedJobId(next.id);
@@ -166,6 +196,9 @@ export function ImageStudio({ station }: { station: Station }) {
     });
   }
   function regenerate(image: GeneratedImage) {
+    formEdited.current = true;
+    customDimensions.current = true;
+    workflowChoice.current = image.workflow_id;
     setPrompt(image.prompt);
     setSeed(String(image.seed));
     setWidth(image.width);
@@ -224,7 +257,10 @@ export function ImageStudio({ station }: { station: Station }) {
             Prompt
             <textarea
               value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
+              onChange={(event) => {
+                formEdited.current = true;
+                setPrompt(event.target.value);
+              }}
               rows={5}
               required
               placeholder="Describe the image"
@@ -236,7 +272,7 @@ export function ImageStudio({ station }: { station: Station }) {
               <select
                 aria-label="Image workflow"
                 value={workflow}
-                onChange={(event) => setWorkflow(event.target.value)}
+                onChange={(event) => selectWorkflow(event.target.value)}
               >
                 <option value="">Select a workflow</option>
                 {workflows.map((item) => (
@@ -283,7 +319,11 @@ export function ImageStudio({ station }: { station: Station }) {
                 min={256}
                 max={2048}
                 step={8}
-                onChange={(event) => setWidth(Number(event.target.value))}
+                onChange={(event) => {
+                  formEdited.current = true;
+                  customDimensions.current = true;
+                  setWidth(Number(event.target.value));
+                }}
               />
             </label>
             <label>
@@ -294,7 +334,11 @@ export function ImageStudio({ station }: { station: Station }) {
                 min={256}
                 max={2048}
                 step={8}
-                onChange={(event) => setHeight(Number(event.target.value))}
+                onChange={(event) => {
+                  formEdited.current = true;
+                  customDimensions.current = true;
+                  setHeight(Number(event.target.value));
+                }}
               />
             </label>
           </div>
@@ -306,7 +350,10 @@ export function ImageStudio({ station }: { station: Station }) {
                 min={0}
                 max={Number.MAX_SAFE_INTEGER}
                 value={seed}
-                onChange={(event) => setSeed(event.target.value)}
+                onChange={(event) => {
+                  formEdited.current = true;
+                  setSeed(event.target.value);
+                }}
                 placeholder="Random"
               />
               <button
@@ -314,9 +361,10 @@ export function ImageStudio({ station }: { station: Station }) {
                 type="button"
                 title="Random seed"
                 aria-label="Random seed"
-                onClick={() =>
-                  setSeed(String(crypto.getRandomValues(new Uint32Array(1))[0] % 2147483647))
-                }
+                onClick={() => {
+                  formEdited.current = true;
+                  setSeed(String(crypto.getRandomValues(new Uint32Array(1))[0] % 2147483647));
+                }}
               >
                 <Dice5 size={19} />
               </button>
@@ -551,6 +599,7 @@ export function ImageStudio({ station }: { station: Station }) {
           confirm={() =>
             void action(async () => {
               await remove(`/images/workflows/${workflow}`);
+              workflowChoice.current = '';
               setWorkflow('');
               setWorkflowDelete(false);
               await load();

@@ -99,6 +99,7 @@ export interface Workflow {
   id: string;
   name: string;
   bindings: Record<string, { node: string; input: string }>;
+  defaults?: { width?: number; height?: number };
   created_at: string;
 }
 export interface GeneratedImage {
@@ -116,6 +117,11 @@ export interface ImageJob {
   status: string;
   progress: number;
   images: GeneratedImage[];
+  prompt?: string;
+  seed?: number;
+  width?: number;
+  height?: number;
+  workflow_id?: string;
   error?: string;
   handoff_warning?: string;
   remote_cleanup_required?: boolean;

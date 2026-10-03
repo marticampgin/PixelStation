@@ -33,6 +33,22 @@ const conversation = {
 };
 const json = (value: unknown) =>
   new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } });
+const imageWorkflows = [
+  {
+    id: 'wf-xl',
+    name: 'SDXL quality',
+    bindings: {},
+    defaults: { width: 1024, height: 1024 },
+    created_at: conversation.created_at,
+  },
+  {
+    id: 'wf-dream',
+    name: 'DreamShaper quality',
+    bindings: {},
+    defaults: { width: 512, height: 512 },
+    created_at: conversation.created_at,
+  },
+];
 function mockApi(custom?: (path: string, init?: RequestInit) => Response | undefined) {
   const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
@@ -155,6 +171,10 @@ describe('workstation interactions', () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findByRole('option', { name: 'LFM2.5 · 2.6B · HF import' });
+    expect(screen.getByRole('combobox', { name: 'Active chat model' })).toHaveAttribute(
+      'title',
+      model,
+    );
     await user.click(screen.getByRole('button', { name: 'Collapse sidebar' }));
     expect(localStorage.getItem('pixel-station:v1:left-open')).toBe('false');
     await user.click(screen.getAllByRole('button', { name: 'Collapse context panel' })[0]);
@@ -276,6 +296,143 @@ describe('workstation interactions', () => {
     expect(await screen.findByRole('button', { name: 'Cancel generation' })).toBeInTheDocument();
     expect(localStorage.getItem('pixel-station:v1:image-job')).toBe('"job-one"');
   });
+
+  it.each([
+    { defaultWorkflow: 'wf-xl', dimension: 1024 },
+    { defaultWorkflow: 'wf-dream', dimension: 512 },
+  ])(
+    'applies $defaultWorkflow dimensions initially and on explicit selection',
+    async ({ defaultWorkflow, dimension }) => {
+      mockApi((path) =>
+        path === '/api/images/workflows'
+          ? json({ workflows: imageWorkflows, default_workflow: defaultWorkflow })
+          : undefined,
+      );
+      const user = userEvent.setup();
+      render(<App />);
+      await user.click(screen.getByRole('button', { name: 'Image Studio' }));
+      await screen.findByRole('option', { name: /SDXL quality/ });
+      const selector = screen.getByRole('combobox', { name: 'Image workflow' });
+      expect(selector).toHaveValue(defaultWorkflow);
+      expect(screen.getByRole('spinbutton', { name: 'Width' })).toHaveValue(dimension);
+      expect(screen.getByRole('spinbutton', { name: 'Height' })).toHaveValue(dimension);
+      await user.selectOptions(selector, 'wf-dream');
+      expect(screen.getByRole('spinbutton', { name: 'Width' })).toHaveValue(512);
+      expect(screen.getByRole('spinbutton', { name: 'Height' })).toHaveValue(512);
+      await user.selectOptions(selector, 'wf-xl');
+      expect(screen.getByRole('spinbutton', { name: 'Width' })).toHaveValue(1024);
+      expect(screen.getByRole('spinbutton', { name: 'Height' })).toHaveValue(1024);
+    },
+  );
+
+  it.each([false, true])(
+    'keeps actual custom dimensions after %s regeneration and metadata reload',
+    async (regenerate) => {
+      const image = {
+        id: 'custom-image',
+        prompt: 'Purple mountain at dusk',
+        seed: 9876543210,
+        width: 648,
+        height: 520,
+        workflow_id: 'wf-xl',
+        created_at: conversation.created_at,
+        content_url: '/api/images/custom-image/content',
+      };
+      let workflowReads = 0;
+      let submitted: Record<string, unknown> | undefined;
+      mockApi((path, init) => {
+        if (path === '/api/images/workflows') {
+          workflowReads += 1;
+          return json({ workflows: imageWorkflows, default_workflow: 'wf-xl' });
+        }
+        if (path === '/api/images/library') return json({ images: regenerate ? [image] : [] });
+        if (path === '/api/images/generate') {
+          submitted = JSON.parse(String(init?.body));
+          return json({ id: 'custom-job', status: 'queued', progress: 0, images: [] });
+        }
+        if (path === '/api/images/jobs/custom-job')
+          return json({ id: 'custom-job', status: 'complete', progress: 1, images: [image] });
+        return undefined;
+      });
+      const user = userEvent.setup();
+      render(<App />);
+      await user.click(screen.getByRole('button', { name: 'Image Studio' }));
+      await screen.findByRole('option', { name: /SDXL quality/ });
+      expect(screen.getByRole('spinbutton', { name: 'Width' })).toHaveValue(1024);
+      if (regenerate) {
+        await user.click(screen.getByRole('button', { name: 'Regenerate image' }));
+      } else {
+        await user.type(screen.getByPlaceholderText('Describe the image'), image.prompt);
+        for (const [label, value] of [
+          ['Width', image.width],
+          ['Height', image.height],
+          ['Seed', image.seed],
+        ] as const) {
+          const field = screen.getByRole('spinbutton', { name: label });
+          await user.clear(field);
+          await user.type(field, String(value));
+        }
+        await user.click(screen.getByRole('button', { name: 'Generate image' }));
+      }
+      await waitFor(() =>
+        expect(submitted).toMatchObject({
+          prompt: image.prompt,
+          seed: image.seed,
+          width: image.width,
+          height: image.height,
+          workflow_id: image.workflow_id,
+        }),
+      );
+      await waitFor(() => expect(workflowReads).toBe(2), { timeout: 4000 });
+      expect(screen.getByRole('spinbutton', { name: 'Width' })).toHaveValue(image.width);
+      expect(screen.getByRole('spinbutton', { name: 'Height' })).toHaveValue(image.height);
+      expect(screen.getByRole('spinbutton', { name: 'Seed' })).toHaveValue(image.seed);
+    },
+  );
+
+  it.each(['/api/images/workflows', '/api/images/jobs/restored-custom'])(
+    'restores saved job dimensions when %s responds later',
+    async (delayedPath) => {
+      localStorage.setItem('pixel-station:v1:image-job', '"restored-custom"');
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const base = mockApi((path) => {
+        if (path === '/api/images/workflows')
+          return json({ workflows: imageWorkflows, default_workflow: 'wf-xl' });
+        if (path === '/api/images/jobs/restored-custom')
+          return json({
+            id: 'restored-custom',
+            status: 'running',
+            progress: 0.4,
+            images: [],
+            prompt: 'Saved custom image',
+            seed: 9876543210,
+            width: 648,
+            height: 520,
+            workflow_id: 'wf-dream',
+          });
+        return undefined;
+      });
+      const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input) === delayedPath) await gate;
+        return base(input, init);
+      });
+      vi.stubGlobal('fetch', fetcher);
+      const user = userEvent.setup();
+      render(<App />);
+      await user.click(screen.getByRole('button', { name: 'Image Studio' }));
+      await waitFor(() =>
+        expect(fetcher.mock.calls.some(([path]) => String(path) === delayedPath)).toBe(true),
+      );
+      await act(async () => release());
+      await screen.findByText('running · 40%');
+      expect(screen.getByRole('combobox', { name: 'Image workflow' })).toHaveValue('wf-dream');
+      expect(screen.getByPlaceholderText('Describe the image')).toHaveValue('Saved custom image');
+      expect(screen.getByRole('spinbutton', { name: 'Width' })).toHaveValue(648);
+      expect(screen.getByRole('spinbutton', { name: 'Height' })).toHaveValue(520);
+      expect(screen.getByRole('spinbutton', { name: 'Seed' })).toHaveValue(9876543210);
+    },
+  );
 
   it('restores an existing image job when reopening the workspace and allows cancellation', async () => {
     localStorage.setItem('pixel-station:v1:image-job', '"previous-job"');

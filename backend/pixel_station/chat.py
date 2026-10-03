@@ -550,7 +550,12 @@ async def generate_response(
             services = getattr(app.state, "integration_services", None)
             if services is None:
                 raise RuntimeError("Integration provider is not available")
-            async with asyncio.timeout(180):
+            integration_timeout = (
+                app.state.tool_registry.tools["image_generate"].timeout
+                if route.intent == "image_generate"
+                else 180
+            )
+            async with asyncio.timeout(integration_timeout):
                 if route.intent == "web_research" and model:
                     async with asyncio.timeout(90), app.state.model_queue.lock:
                         plan_messages = [
