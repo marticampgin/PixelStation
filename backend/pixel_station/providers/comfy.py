@@ -103,8 +103,10 @@ class ComfyImageProvider:
 
     async def start_generation(self, prompt: str, workflow_id: str | None = None, seed: int | None = None,
                                width: int = 512, height: int = 512) -> dict[str, Any]:
-        if not self.endpoint():
+        endpoint = self.endpoint()
+        if not endpoint:
             raise IntegrationError("Configure and start ComfyUI before generating images.", "comfyui_missing")
+        endpoint = endpoint_url(endpoint)
         if not prompt.strip() or len(prompt) > 10_000 or not 256 <= width <= 2048 or not 256 <= height <= 2048 or width % 8 or height % 8:
             raise IntegrationError("Use a prompt under 10,000 characters and dimensions from 256–2048 in multiples of 8.", "invalid_generation", 422)
         workflow_id = workflow_id or self.default_workflow()
@@ -113,7 +115,8 @@ class ComfyImageProvider:
         if not 0 <= seed < 2**53:
             raise IntegrationError("Seed must be from 0 to 2^53-1.", "invalid_seed", 422)
         id_ = str(uuid.uuid4())
-        payload = {"prompt": prompt, "workflow_id": workflow_id, "seed": seed, "width": width, "height": height}
+        payload = {"prompt": prompt, "workflow_id": workflow_id, "seed": seed, "width": width, "height": height,
+                   "endpoint": endpoint}
         with self.db() as db:
             db.execute("INSERT INTO jobs(id,payload,status,created_at) VALUES(?,?,?,?)", (id_, json.dumps(payload), "queued", now()))
         self.tasks[id_] = asyncio.create_task(self._run(id_, payload))
@@ -140,9 +143,9 @@ class ComfyImageProvider:
         with self.db() as db:
             db.execute(f"UPDATE jobs SET {','.join(k+'=?' for k in kwargs)} WHERE id=?", (*kwargs.values(), id_))
 
-    async def _progress(self, id_: str, client_id: str) -> None:
+    async def _progress(self, id_: str, client_id: str, endpoint: str) -> None:
         import websockets
-        parsed = urlsplit(endpoint_url(self.endpoint()))
+        parsed = urlsplit(endpoint_url(endpoint))
         ws_url = urlunsplit(("wss" if parsed.scheme == "https" else "ws", parsed.netloc, parsed.path + "/ws", urlencode({"clientId": client_id}), ""))
         try:
             async with websockets.connect(ws_url, open_timeout=5, max_size=2_000_000) as ws:
@@ -171,9 +174,9 @@ class ComfyImageProvider:
                 for key, binding in bindings.items():
                     workflow[str(binding["node"])]["inputs"][binding["input"]] = payload[key]
                 client_id = str(uuid.uuid4())
+                base = endpoint_url(payload.get("endpoint") or self.endpoint())
                 if self.transport is None:
-                    progress_task = asyncio.create_task(self._progress(id_, client_id))
-                base = endpoint_url(self.endpoint())
+                    progress_task = asyncio.create_task(self._progress(id_, client_id, base))
                 async with httpx.AsyncClient(timeout=30, transport=self.transport, trust_env=False) as client:
                     response = await client.post(base + "/prompt", json={"prompt": workflow, "client_id": client_id})
                     response.raise_for_status()
@@ -276,7 +279,7 @@ class ComfyImageProvider:
         if job.get("prompt_id") and job["status"] in {"queued", "running"}:
             try:
                 async with httpx.AsyncClient(timeout=10, transport=self.transport, trust_env=False) as client:
-                    await self._cancel_remote(client, endpoint_url(self.endpoint()), job["prompt_id"])
+                    await self._cancel_remote(client, endpoint_url(job.get("endpoint") or self.endpoint()), job["prompt_id"])
             except httpx.HTTPError as exc:
                 self._update(id_, status="cancelled", error="Cancelled locally; ComfyUI was unreachable. Check its queue.")
                 raise IntegrationError("Cancelled locally; ComfyUI was unreachable. Check its queue.", "cancel_failed") from exc

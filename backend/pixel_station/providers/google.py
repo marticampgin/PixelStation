@@ -244,6 +244,8 @@ class GoogleConnector:
             _, text = parser.result()
         return {"id": message.get("id"), "subject": headers.get("subject", ""), "from": headers.get("from", ""),
                 "to": headers.get("to", ""), "date": headers.get("date", ""), "body": text[:50_000],
+                "reply_to": headers.get("reply-to", ""),
+                "label_ids": message.get("labelIds", []),
                 "message_id": headers.get("message-id", ""), "attachments": attachments}
 
     async def thread(self, id_: str) -> dict[str, Any]:

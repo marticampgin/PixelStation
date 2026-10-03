@@ -7,6 +7,7 @@ import type { Station } from '../../hooks/useStation';
 import type { IntegrationStatus, Settings } from '../../types';
 import { GoogleSetup } from '../google/GoogleSetup';
 import { SearxSetup } from '../web/SearxSetup';
+import { HarnessReports, type HarnessReport } from './HarnessReports';
 
 const tabs = ['Models', 'Image generation', 'Web', 'Google', 'Memory', 'Agent', 'Harness', 'Data'];
 const presets: Record<string, { primary: string; embedding: string; context: number }> = {
@@ -24,7 +25,7 @@ export function SettingsView({ station }: { station: Station }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const [reports, setReports] = useState<Record<string, unknown>[] | null>(null);
+  const [reports, setReports] = useState<HarnessReport[] | null>(null);
   const [cacheConfirm, setCacheConfirm] = useState(false);
   const [dataPath, setDataPath] = useState('');
   useEffect(() => {
@@ -69,7 +70,7 @@ export function SettingsView({ station }: { station: Station }) {
   }
   async function loadHarness() {
     try {
-      const result = await request<{ reports: Record<string, unknown>[] }>('/harness');
+      const result = await request<{ reports: HarnessReport[] }>('/harness');
       setReports(result.reports);
     } catch (err) {
       setError(errorMessage(err));
@@ -379,16 +380,7 @@ export function SettingsView({ station }: { station: Station }) {
                   Generate report now
                 </button>
               </section>
-              {reports?.length ? (
-                reports.map((report, i) => (
-                  <details className="report" key={i}>
-                    <summary>{String(report.summary ?? report.title ?? `Report ${i + 1}`)}</summary>
-                    <pre className="code-block">{JSON.stringify(report, null, 2)}</pre>
-                  </details>
-                ))
-              ) : (
-                <p className="muted">No reports yet.</p>
-              )}
+              <HarnessReports reports={reports} />
             </>
           ) : null}
           {tab === 'Data' ? (

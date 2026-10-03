@@ -246,6 +246,67 @@ async def test_cancelling_chat_image_await_stops_its_remote_comfy_prompt(tmp_pat
     assert row["status"] == "cancelled"
 
 
+@pytest.mark.asyncio
+async def test_comfy_queued_job_retains_endpoint_after_settings_change(tmp_path: Path) -> None:
+    configured = ["http://127.0.0.1:8188"]
+    requests = []
+    img = io.BytesIO()
+    Image.new("RGB", (16, 16)).save(img, "PNG")
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        assert request.url.port == 8188
+        if request.url.path == "/prompt":
+            return httpx.Response(200, json={"prompt_id": "queued-prompt"})
+        if request.url.path == "/history/queued-prompt":
+            return httpx.Response(200, json={"queued-prompt": {"status": {"completed": True}, "outputs": {
+                "9": {"images": [{"filename": "actual.png", "subfolder": "", "type": "output"}]}}}})
+        return httpx.Response(200, content=img.getvalue())
+
+    provider = ComfyImageProvider(tmp_path, lambda: configured[0], lambda: "", transport=httpx.MockTransport(serve))
+    graph, bindings = workflow()
+    imported = provider.import_workflow("Endpoint test", graph, bindings)
+    await provider.lock.acquire()
+    job = await provider.start_generation("Actual prompt", workflow_id=imported["id"])
+    configured[0] = "http://127.0.0.1:8189"
+    task = provider.tasks[job["id"]]
+    provider.lock.release()
+    await asyncio.wait_for(task, timeout=1)
+    assert provider.job(job["id"])["status"] == "complete"
+    assert provider.job(job["id"])["endpoint"] == "http://127.0.0.1:8188"
+    assert len(requests) == 3
+
+
+@pytest.mark.asyncio
+async def test_comfy_cancellation_uses_submitted_endpoint_after_settings_change(tmp_path: Path) -> None:
+    configured = ["http://127.0.0.1:8188"]
+    poll_started = asyncio.Event()
+    requests = []
+
+    async def serve(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path, request.url.port))
+        assert request.url.port == 8188
+        if request.url.path == "/prompt":
+            return httpx.Response(200, json={"prompt_id": "own-prompt"})
+        if request.url.path == "/history/own-prompt":
+            poll_started.set()
+            return httpx.Response(200, json={})
+        if request.url.path == "/queue" and request.method == "GET":
+            return httpx.Response(200, json={"queue_running": [[0, "own-prompt", {}, {}]]})
+        return httpx.Response(200, json={})
+
+    provider = ComfyImageProvider(tmp_path, lambda: configured[0], lambda: "", transport=httpx.MockTransport(serve))
+    graph, bindings = workflow()
+    imported = provider.import_workflow("Endpoint test", graph, bindings)
+    job = await provider.start_generation("Actual prompt", workflow_id=imported["id"])
+    await asyncio.wait_for(poll_started.wait(), timeout=1)
+    configured[0] = "http://127.0.0.1:8189"
+    result = await provider.cancel(job["id"])
+    assert result["status"] == "cancelled"
+    assert ("POST", "/queue", 8188) in requests
+    assert ("POST", "/interrupt", 8188) in requests
+
+
 def test_workflow_binding_validation_and_restart_recovery(tmp_path: Path) -> None:
     provider = ComfyImageProvider(tmp_path, lambda: "", lambda: "")
     with pytest.raises(IntegrationError, match="API format"):
@@ -313,6 +374,23 @@ async def test_google_draft_verifies_real_id_and_decodes_thread(tmp_path: Path) 
     assert draft["id"] == "draft-id"
     thread = await connector.thread("thread-id")
     assert thread["messages"][0]["body"] == "Private client body"
+
+
+def test_google_thread_preserves_reply_to_and_sent_labels_for_correct_reply_target() -> None:
+    inbound = GoogleConnector._message({"id": "received", "labelIds": ["INBOX"], "payload": {
+        "headers": [{"name": "From", "value": "Service <noreply@example.com>"},
+                    {"name": "Reply-To", "value": "Support <support@example.com>"},
+                    {"name": "Message-ID", "value": "<incoming@example.com>"}],
+        "mimeType": "text/plain", "body": {"data": base64.urlsafe_b64encode(b"Question").decode()}}})
+    outbound = GoogleConnector._message({"id": "sent", "labelIds": ["SENT"], "payload": {
+        "headers": [{"name": "From", "value": "User <user@example.com>"},
+                    {"name": "To", "value": "Support <support@example.com>"},
+                    {"name": "Message-ID", "value": "<outgoing@example.com>"}]}})
+    assert inbound["reply_to"] == "Support <support@example.com>"
+    assert inbound["label_ids"] == ["INBOX"]
+    assert outbound["label_ids"] == ["SENT"]
+    assert outbound["to"] == "Support <support@example.com>"
+    assert inbound["message_id"] == "<incoming@example.com>"
 
 
 def test_google_rejects_header_injection_unsafe_credentials_and_invalid_dates(tmp_path: Path) -> None:

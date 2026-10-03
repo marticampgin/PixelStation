@@ -914,6 +914,15 @@
   max-height: 350px;
   overflow-y: auto;
 }
+.edit-plan {
+  white-space: pre-wrap;
+  font-size: 13px;
+  color: var(--muted);
+}
+.file-edit-card summary {
+  cursor: pointer;
+  margin-bottom: 12px;
+}
 .image-library-meta {
   margin-top: 7px;
   overflow-wrap: anywhere;
@@ -1043,6 +1052,48 @@
 }
 .report summary {
   cursor: pointer;
+}
+.harness-reports .report > summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 15px;
+  flex-wrap: wrap;
+}
+.harness-report-body {
+  padding-top: 20px;
+}
+.harness-finding {
+  margin: 0 0 20px;
+  padding: 18px;
+  border-left: 2px solid #68558d;
+  background: #181627;
+}
+.finding-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 13px;
+}
+.finding-heading h3 {
+  text-transform: capitalize;
+  margin: 0;
+}
+.harness-finding p {
+  color: #bcb8cc;
+  font-size: 13px;
+  margin-bottom: 14px;
+}
+.finding-examples summary {
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+  margin-bottom: 12px;
+}
+.finding-examples .code-block {
+  max-height: 250px;
+  overflow: auto;
+  font-size: 11px;
 }
 .setup-steps {
   color: var(--muted);

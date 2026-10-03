@@ -3,6 +3,8 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { App } from '../src/App';
 import { ApprovalCard } from '../src/features/google/ApprovalCard';
+import { HarnessReports } from '../src/features/settings/HarnessReports';
+import { FileEditCard } from '../src/features/files/FileEditCard';
 
 const model = 'hf.co/LiquidAI/LFM2.5-2.6B-GGUF:Q4_K_M';
 const settings = {
@@ -179,6 +181,28 @@ describe('workstation interactions', () => {
       }),
     );
     expect(await screen.findByRole('button', { name: 'Cancel generation' })).toBeInTheDocument();
+    expect(localStorage.getItem('pixel-station:v1:image-job')).toBe('"job-one"');
+  });
+
+  it('restores an existing image job when reopening the workspace and allows cancellation', async () => {
+    localStorage.setItem('pixel-station:v1:image-job', '"previous-job"');
+    const fetcher = mockApi((path) =>
+      path === '/api/images/jobs/previous-job'
+        ? json({ id: 'previous-job', status: 'running', progress: 0.4, images: [] })
+        : undefined,
+    );
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: 'Image Studio' }));
+    expect(await screen.findByText('running · 40%')).toBeInTheDocument();
+    expect(fetcher).not.toHaveBeenCalledWith('/api/images/generate', expect.anything());
+    await user.click(screen.getByRole('button', { name: 'Cancel generation' }));
+    await waitFor(() =>
+      expect(fetcher).toHaveBeenCalledWith(
+        '/api/images/jobs/previous-job',
+        expect.objectContaining({ method: 'DELETE' }),
+      ),
+    );
   });
 
   it('requests only the poker actions the deterministic engine exposes', async () => {
@@ -381,6 +405,33 @@ describe('workstation interactions', () => {
 });
 
 describe('confirmation enforcement', () => {
+  it('confirms a chat file-edit proposal exactly once and exposes the preserved original revision', async () => {
+    const fetcher = mockApi((path) =>
+      path === '/api/files/edit-proposals/chat-edit/confirm'
+        ? json({ id: 'file-one', revision_id: 'original-one' })
+        : undefined,
+    );
+    const user = userEvent.setup();
+    render(
+      <FileEditCard
+        proposal={{
+          id: 'chat-edit',
+          file_id: 'file-one',
+          filename: 'notes.txt',
+          plan: 'Update the reviewed paragraph.',
+          preview_content: 'Reviewed replacement',
+        }}
+      />,
+    );
+    expect(fetcher).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'Confirm file edit' }));
+    await screen.findByText('File updated');
+    expect(screen.getByRole('link', { name: 'Download original revision' })).toHaveAttribute(
+      'href',
+      '/api/files/file-one/revisions/original-one/content',
+    );
+    expect(screen.queryByRole('button', { name: 'Confirm file edit' })).not.toBeInTheDocument();
+  });
   it('sends the stored approval ID only after explicit confirmation and prevents repeat clicks', async () => {
     const fetcher = mockApi();
     const user = userEvent.setup();
@@ -402,5 +453,37 @@ describe('confirmation enforcement', () => {
       expect.objectContaining({ method: 'POST', body: '{"confirmed":true}' }),
     );
     expect(screen.queryByRole('button', { name: 'Confirm action' })).not.toBeInTheDocument();
+  });
+});
+
+describe('harness reports', () => {
+  it('presents actual findings and suggested fixes as readable report content', () => {
+    render(
+      <HarnessReports
+        reports={[
+          {
+            id: 'report-one',
+            created_at: conversation.created_at,
+            report: {
+              window_days: 7,
+              event_count: 2,
+              findings: [
+                {
+                  kind: 'response_error',
+                  count: 2,
+                  proposal: 'Verify the local model connection.',
+                  examples: ['Ollama connection refused'],
+                },
+              ],
+              regression_candidates: [],
+            },
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByText('2 friction events · 7 days')).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'response error' })).toBeInTheDocument();
+    expect(screen.getByText('Verify the local model connection.')).toBeInTheDocument();
+    expect(screen.getByText('Ollama connection refused')).toBeInTheDocument();
   });
 });

@@ -56,6 +56,8 @@ The abbreviated graph above illustrates the wrapper only; use your complete expo
 
 Generation submits to `/prompt`, follows websocket progress when available, and confirms output through `/history/{prompt_id}`. Completed images are downloaded via `/view` into the local data directory and validated as PNG/JPEG/WebP. Workflows, job state, prompts, seeds and the image library persist under `data/images`. Interrupted jobs are marked on restart; they are not silently retried. Each provider serializes jobs to avoid overlapping inference on low-memory systems. Cancelling a job removes its queued prompt and only interrupts ComfyUI when that specific prompt is executing. [ComfyUI server API](https://docs.comfy.org/development/comfyui-server/comms_routes).
 
+Each job retains the endpoint chosen when it was submitted. Changing Settings affects later jobs; existing queued/running jobs continue polling, downloading and cancelling at their original ComfyUI endpoint.
+
 An invalid workflow generally indicates a missing checkpoint/custom node or a canvas export. A workflow with no saved output returns an error. Out-of-memory failures require reducing dimensions, using an appropriate model, or freeing GPU memory. Generations have a ten-minute deadline; image downloads have a 40 MB cap.
 
 ## Gmail and Google Calendar
@@ -89,6 +91,12 @@ An External OAuth app left in **Testing** receives refresh tokens that expire af
 Google's verification requirements depend on the selected scopes and distribution. Personal-use exceptions can apply for an owner/small known group; an unverified-app warning or user cap may still appear. Review the console's current requirements before publishing an app for others. A Workspace organization may need administrator approval for these scopes. No public deployment or verification is performed by Pixel Station.
 
 Disconnect removes this installation's local OS-keyring token. To revoke the app's access at Google as well, remove it from your Google Account's third-party connections. Never add credential JSON, tokens, private email, generated artifacts or databases to Git.
+
+## Managed file edits
+
+The Files editor and explicit chat edit requests create a reviewed proposal before changing a file. TXT and Markdown replace text, CSV replaces CSV text, XLSX replaces first-worksheet values from CSV while preserving other sheets and cell styles, and DOCX replaces paragraphs while preserving existing tables and paragraph styles. Edited spreadsheet values become text and formula-like input is escaped. DOCX inline formatting is reset. PDF edits rebuild a local PDF from reviewed text, resetting original layout, images and annotations. These scope limitations are shown before confirmation.
+
+Edits affect the managed library copy. They never overwrite the source file on your Desktop or another original host path. A proposal binds the exact replacement, plan and original content hash, expires after ten minutes, and can be confirmed once. A changed original or altered replacement requires a new proposal. Validation finishes before updating the library; applying an edit preserves the prior bytes, keeps the same library file ID, and rebuilds retrieval chunks and provenance. The revision API lists and downloads prior originals. File proposals and revisions use Alembic revision `0002` in the core database, and their staged/revised bytes live under the configured data directory. Include the full data directory in backups.
 
 ## Provider/API boundary
 

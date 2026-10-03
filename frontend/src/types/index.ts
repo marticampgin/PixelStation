@@ -139,6 +139,9 @@ export interface EmailMessage {
   date: string;
   body: string;
   attachments: { filename: string; mime_type: string; size: number }[];
+  message_id?: string;
+  reply_to?: string;
+  label_ids?: string[];
 }
 export interface Approval {
   id: string;

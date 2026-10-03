@@ -10,6 +10,7 @@ import {
   formatDate,
 } from '../../components/ui';
 import type { Station } from '../../hooks/useStation';
+import { useLocalStorage } from '../../hooks/useLocalStorage';
 import type { GeneratedImage, ImageJob, IntegrationStatus, Workflow } from '../../types';
 
 export function ImageStudio({ station }: { station: Station }) {
@@ -23,6 +24,7 @@ export function ImageStudio({ station }: { station: Station }) {
   const [height, setHeight] = useState(512);
   const [seed, setSeed] = useState('');
   const [job, setJob] = useState<ImageJob | null>(null);
+  const [savedJobId, setSavedJobId] = useLocalStorage<string | null>('image-job', null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [importing, setImporting] = useState(false);
@@ -63,6 +65,31 @@ export function ImageStudio({ station }: { station: Station }) {
   useEffect(() => {
     void load();
   }, []);
+  useEffect(() => {
+    if (!savedJobId) return;
+    let active = true;
+    request<ImageJob>(`/images/jobs/${savedJobId}`)
+      .then((restored) => {
+        if (!active) return;
+        setJob(restored);
+        if (['complete', 'completed'].includes(restored.status))
+          setSelected(restored.images[0] ?? null);
+        if (restored.error) setError(restored.error);
+      })
+      .catch((err) => {
+        if (!active) return;
+        if (err.status === 404) setSavedJobId(null);
+        else setError(errorMessage(err));
+      });
+    return () => {
+      active = false;
+    };
+    // Restore the last server-owned job once when this workspace opens.
+  }, []);
+  function trackJob(next: ImageJob) {
+    setSavedJobId(next.id);
+    setJob(next);
+  }
   const jobId = job?.id;
   const running =
     job && !['complete', 'completed', 'failed', 'cancelled', 'interrupted'].includes(job.status);
@@ -112,7 +139,7 @@ export function ImageStudio({ station }: { station: Station }) {
         width,
         height,
       });
-      setJob(next);
+      trackJob(next);
     });
   }
   async function importWorkflow() {
@@ -137,7 +164,7 @@ export function ImageStudio({ station }: { station: Station }) {
     setWorkflow(image.workflow_id);
     setSelected(image);
     void action(async () =>
-      setJob(
+      trackJob(
         await post<ImageJob>('/images/generate', {
           prompt: image.prompt,
           seed: image.seed,
@@ -485,6 +512,10 @@ export function ImageStudio({ station }: { station: Station }) {
             void action(async () => {
               await remove(`/images/${deleting.id}`);
               if (selected?.id === deleting.id) setSelected(null);
+              if (job?.images.some((image) => image.id === deleting.id)) {
+                setSavedJobId(null);
+                setJob(null);
+              }
               setDeleting(null);
               await load();
             })

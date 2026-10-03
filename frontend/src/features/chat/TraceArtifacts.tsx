@@ -1,6 +1,7 @@
 import { Download } from 'lucide-react';
 import type { Approval, GeneratedImage, LocalFile, Message } from '../../types';
 import { ApprovalCard } from '../google/ApprovalCard';
+import { FileEditCard, type FileEditProposal } from '../files/FileEditCard';
 
 export function TraceArtifacts({ message }: { message: Message }) {
   return (
@@ -12,6 +13,7 @@ export function TraceArtifacts({ message }: { message: Message }) {
               images?: GeneratedImage[];
               job_id?: string;
               sources?: { url: string; title?: string }[];
+              file_edit?: FileEditProposal;
             }
           | undefined;
         const sources =
@@ -49,6 +51,7 @@ export function TraceArtifacts({ message }: { message: Message }) {
               </a>
             ))}
             {result?.approval ? <ApprovalCard approval={result.approval} /> : null}
+            {result?.file_edit ? <FileEditCard proposal={result.file_edit} /> : null}
           </div>
         );
       })}

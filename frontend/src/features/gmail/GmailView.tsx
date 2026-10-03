@@ -6,6 +6,7 @@ import { useResource } from '../../hooks/useResource';
 import type { Approval, EmailMessage, EmailThread, GoogleStatus } from '../../types';
 import { ApprovalCard } from '../google/ApprovalCard';
 import { GoogleSetup } from '../google/GoogleSetup';
+import { replyTarget } from './replyTarget';
 
 const loadStatus = () => request<GoogleStatus>('/google/status');
 export function GmailView() {
@@ -15,6 +16,7 @@ export function GmailView() {
   const [thread, setThread] = useState<EmailThread | null>(null);
   const [query, setQuery] = useState('');
   const [to, setTo] = useState('');
+  const [inReplyTo, setInReplyTo] = useState<string | undefined>();
   const [subject, setSubject] = useState('');
   const [body, setBody] = useState('');
   const [instructions, setInstructions] = useState('');
@@ -55,8 +57,9 @@ export function GmailView() {
         `/google/gmail/threads/${item.id}`,
       );
       setMessages(result.messages);
-      const last = result.messages.at(-1);
-      setTo(last?.from.match(/<([^>]+)>/)?.[1] ?? last?.from ?? '');
+      const target = replyTarget(result.messages);
+      setTo(target.recipient);
+      setInReplyTo(target.messageId);
       setSubject(/^re:/i.test(item.subject) ? item.subject : `Re: ${item.subject}`);
     });
   }
@@ -65,7 +68,7 @@ export function GmailView() {
     subject,
     body,
     thread_id: thread?.id,
-    in_reply_to: (messages.at(-1) as EmailMessage & { message_id?: string })?.message_id,
+    in_reply_to: inReplyTo,
   });
   if (status.loading)
     return (
