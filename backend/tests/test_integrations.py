@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
@@ -31,6 +32,25 @@ def event() -> dict:
 def services(tmp_path: Path) -> IntegrationServices:
     settings = {}
     return IntegrationServices(tmp_path, lambda key, default: settings.get(key, default), settings.__setitem__)
+
+
+def test_image_workflow_default_is_validated_and_persisted(tmp_path: Path) -> None:
+    service = services(tmp_path)
+    app = FastAPI()
+    app.include_router(create_integrations_router(service))
+    workflow = {"1": {"class_type": "CLIPTextEncode", "inputs": {"text": "original"}}}
+    bindings = {"prompt": {"node": "1", "input": "text"}}
+    with TestClient(app) as client:
+        first = client.post("/api/images/workflows", json={"name": "First", "workflow": workflow, "bindings": bindings}).json()
+        second = client.post("/api/images/workflows", json={"name": "Second", "workflow": workflow, "bindings": bindings}).json()
+        assert client.get("/api/images/workflows").json()["default_workflow"] == first["id"]
+        assert client.put("/api/images/workflows/default", json={"workflow_id": "missing"}).status_code == 404
+        response = client.put("/api/images/workflows/default", json={"workflow_id": second["id"]})
+        assert response.status_code == 200
+        assert response.json()["default_workflow_id"] == second["id"]
+        assert service.get_setting("comfyui_default_workflow", "") == second["id"]
+        assert client.delete(f"/api/images/workflows/{second['id']}").status_code == 200
+        assert client.get("/api/images/workflows").json()["default_workflow"] == first["id"]
 
 
 def test_approval_exact_payload_and_single_use(tmp_path: Path) -> None:
@@ -140,6 +160,30 @@ async def test_research_preserves_actual_sources_and_fetch_failure() -> None:
     assert "Search snippet" in result["context"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("budget", [1, 2, 3, 4, 6, 12])
+async def test_research_tool_budget_counts_searches_and_fetches(budget: int) -> None:
+    calls = {"search": 0, "fetch": 0}
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/search":
+            calls["search"] += 1
+            return httpx.Response(200, json={"results": [{"url": f"https://example.com/source{i}", "title": f"Source {i}"} for i in range(4)]})
+        calls["fetch"] += 1
+        return httpx.Response(200, headers={"content-type": "text/plain"}, text="Actual evidence")
+
+    provider = WebProvider(lambda: "http://127.0.0.1:8888", transport=httpx.MockTransport(serve), resolver=lambda *_: ["93.184.216.34"])
+    result = await provider.research(["one", "two", "three", "four"], limit=6, max_steps=budget)
+    assert calls["search"] + calls["fetch"] <= budget
+    assert result["tool_steps"]["total"] == calls["search"] + calls["fetch"]
+    assert result["tool_steps"]["search"] == calls["search"]
+    assert result["tool_steps"]["fetch"] == calls["fetch"]
+    if budget == 1:
+        assert calls == {"search": 1, "fetch": 0}
+    if budget >= 3:
+        assert 2 <= calls["search"] <= 4 and calls["fetch"] >= 1
+
+
 def workflow() -> tuple[dict, dict]:
     return {"6": {"class_type": "CLIPTextEncode", "inputs": {"text": "old"}},
             "3": {"class_type": "KSampler", "inputs": {"seed": 0}}}, {"prompt": {"node": "6", "input": "text"}, "seed": {"node": "3", "input": "seed"}}
@@ -170,6 +214,36 @@ async def test_comfy_executes_actual_workflow_and_persists_image(tmp_path: Path)
     assert provider.image_path(saved["id"]).read_bytes() == img.getvalue()
     reopened = ComfyImageProvider(tmp_path, lambda: "", lambda: "")
     assert reopened.library()[0]["id"] == saved["id"]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_chat_image_await_stops_its_remote_comfy_prompt(tmp_path: Path) -> None:
+    poll_started = asyncio.Event()
+    calls = []
+
+    async def serve(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.url.path == "/prompt":
+            return httpx.Response(200, json={"prompt_id": "own-prompt"})
+        if request.url.path == "/history/own-prompt":
+            poll_started.set()
+            return httpx.Response(200, json={})
+        if request.url.path == "/queue" and request.method == "GET":
+            return httpx.Response(200, json={"queue_running": [[0, "own-prompt", {}, {}]]})
+        return httpx.Response(200, json={})
+
+    provider = ComfyImageProvider(tmp_path, lambda: "http://127.0.0.1:8188", lambda: "", transport=httpx.MockTransport(serve))
+    graph, bindings = workflow()
+    imported = provider.import_workflow("Test workflow", graph, bindings)
+    task = asyncio.create_task(provider.generate("Actual prompt", workflow_id=imported["id"]))
+    await asyncio.wait_for(poll_started.wait(), timeout=1)
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    assert ("POST", "/queue") in calls
+    assert ("POST", "/interrupt") in calls
+    with provider.db() as db:
+        row = db.execute("SELECT status FROM jobs").fetchone()
+    assert row["status"] == "cancelled"
 
 
 def test_workflow_binding_validation_and_restart_recovery(tmp_path: Path) -> None:

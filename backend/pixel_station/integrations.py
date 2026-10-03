@@ -58,6 +58,10 @@ class WorkflowInput(Input):
     bindings: dict[str, Any]
 
 
+class DefaultWorkflowInput(Input):
+    workflow_id: str = Field(min_length=1, max_length=100)
+
+
 class GenerationInput(Input):
     prompt: str = Field(min_length=1, max_length=10_000)
     workflow_id: str | None = None
@@ -184,8 +188,8 @@ class IntegrationServices:
     async def chat_context(self, route: str, prompt: str) -> dict[str, Any]:
         """Tool integration hook: model synthesis receives evidence, never invented success."""
         if route in {"web", "web_search", "web_research", "search"}:
-            evidence = await self.web.research([prompt], limit=4)
-            return {"content": evidence["context"], "sources": evidence["sources"]}
+            evidence = await self.web.research([prompt], limit=4, max_steps=int(self.get_setting("max_steps", 6)))
+            return {"content": evidence["context"], "sources": evidence["sources"], "tool_steps": evidence["tool_steps"]}
         if route in {"image", "image_generate"}:
             result = await self.images.generate(prompt)
             return {"content": "Generated image saved to the local Image Studio library.", "image": result["images"][0] if result["images"] else None,
@@ -220,7 +224,7 @@ def create_integrations_router(services: IntegrationServices) -> APIRouter:
 
     @router.post("/api/web/research")
     async def research(body: ResearchInput) -> dict[str, Any]:
-        return await services.web.research(body.queries, body.limit)
+        return await services.web.research(body.queries, body.limit, max_steps=int(services.get_setting("max_steps", 6)))
 
     @router.get("/api/images/status")
     async def image_status() -> dict[str, Any]:
@@ -236,6 +240,13 @@ def create_integrations_router(services: IntegrationServices) -> APIRouter:
         if not services.get_setting("comfyui_default_workflow", ""):
             services.set_setting("comfyui_default_workflow", result["id"])
         return result
+
+    @router.put("/api/images/workflows/default")
+    async def default_workflow(body: DefaultWorkflowInput) -> dict[str, Any]:
+        if not any(row["id"] == body.workflow_id for row in services.images.workflows()):
+            raise IntegrationError("Workflow not found.", "not_found", 404)
+        services.set_setting("comfyui_default_workflow", body.workflow_id)
+        return {"default_workflow_id": body.workflow_id}
 
     @router.delete("/api/images/workflows/{id_}")
     async def delete_workflow(id_: str) -> dict[str, Any]:

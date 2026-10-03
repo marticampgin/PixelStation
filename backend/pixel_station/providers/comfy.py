@@ -122,7 +122,9 @@ class ComfyImageProvider:
     async def generate(self, prompt: str, **kwargs: Any) -> dict[str, Any]:
         job = await self.start_generation(prompt, **kwargs)
         try:
-            await self.tasks[job["id"]]
+            # Keep the job alive until cancel() captures its running prompt ID.
+            # Direct propagation would mark it cancelled before remote cleanup.
+            await asyncio.shield(self.tasks[job["id"]])
         except asyncio.CancelledError:
             await self.cancel(job["id"])
             raise
@@ -193,7 +195,7 @@ class ComfyImageProvider:
                                 saved = 0
                                 for output in history.get("outputs", {}).values():
                                     for image in output.get("images", [])[:8]:
-                                        await self._download(client, base, id_, payload, image)
+                                        await asyncio.wait_for(self._download(client, base, id_, payload, image), timeout=60)
                                         saved += 1
                                         if saved >= 8:
                                             break
@@ -209,7 +211,7 @@ class ComfyImageProvider:
         except asyncio.CancelledError:
             self._update(id_, status="cancelled", error="Cancelled by user.")
             raise
-        except (httpx.HTTPError, IntegrationError, ValueError, OSError) as exc:
+        except (httpx.HTTPError, IntegrationError, ValueError, OSError, TimeoutError) as exc:
             self._update(id_, status="failed", error=str(exc) if isinstance(exc, IntegrationError) else "ComfyUI request failed. Check the local endpoint and console.")
         finally:
             if progress_task:
@@ -257,7 +259,8 @@ class ComfyImageProvider:
         return {**{k: v for k, v in dict(row).items() if k != "payload"}, **json.loads(row["payload"]), "images": self.library(id_)}
 
     async def _cancel_remote(self, client: httpx.AsyncClient, base: str, prompt_id: str) -> None:
-        await client.post(base + "/queue", json={"delete": [prompt_id]})
+        response = await client.post(base + "/queue", json={"delete": [prompt_id]})
+        response.raise_for_status()
         response = await client.get(base + "/queue")
         response.raise_for_status()
         if any(item[1] == prompt_id for item in response.json().get("queue_running", []) if len(item) > 1):

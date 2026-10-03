@@ -161,6 +161,13 @@ class GoogleConnector:
 
     async def request(self, method: str, url: str, *, params: dict[str, Any] | None = None,
                       body: dict[str, Any] | None = None, etag: str | None = None) -> dict[str, Any]:
+        try:
+            return await asyncio.wait_for(self._request(method, url, params=params, body=body, etag=etag), timeout=60)
+        except TimeoutError as exc:
+            raise IntegrationError("Google request exceeded its 60-second total limit. A mutation may have completed; check Google before proposing it again.", "google_timeout") from exc
+
+    async def _request(self, method: str, url: str, *, params: dict[str, Any] | None = None,
+                       body: dict[str, Any] | None = None, etag: str | None = None) -> dict[str, Any]:
         token = await self._token()
         headers = {"Authorization": "Bearer " + token}
         if etag:
@@ -182,7 +189,10 @@ class GoogleConnector:
                         raw.extend(chunk)
                         if len(raw) > 10_000_000:
                             raise IntegrationError("Google response exceeded 10 MB. Narrow the search.", "response_too_large", 422)
-                    return json.loads(raw)
+                    payload = json.loads(raw)
+                    if not isinstance(payload, dict):
+                        raise IntegrationError("Google returned an invalid response.", "google_api_failed")
+                    return payload
         except (httpx.HTTPError, ValueError) as exc:
             raise IntegrationError("Google API request failed. Check connectivity and account permissions.", "google_api_failed") from exc
 
@@ -206,7 +216,9 @@ class GoogleConnector:
     def _message(message: dict[str, Any]) -> dict[str, Any]:
         payload = message.get("payload", {})
         headers = {str(h.get("name", "")).lower(): str(h.get("value", "")) for h in payload.get("headers", [])}
-        plain, html, attachments = [], [], []
+        plain: list[str] = []
+        html: list[str] = []
+        attachments: list[dict[str, Any]] = []
         pending = [payload]
         count = 0
         while pending and count < 256:
@@ -283,9 +295,8 @@ class GoogleConnector:
                     raise ValueError("timezone missing")
             except ValueError as exc:
                 raise IntegrationError("Calendar range requires RFC3339 timestamps with timezone offsets.", "invalid_range", 422) from exc
-        if time_min >= time_max:
-            if datetime.fromisoformat(time_min.replace("Z", "+00:00")) >= datetime.fromisoformat(time_max.replace("Z", "+00:00")):
-                raise IntegrationError("Calendar range end must follow its start.", "invalid_range", 422)
+        if datetime.fromisoformat(time_min.replace("Z", "+00:00")) >= datetime.fromisoformat(time_max.replace("Z", "+00:00")):
+            raise IntegrationError("Calendar range end must follow its start.", "invalid_range", 422)
         return await self.request("GET", CALENDAR + "/calendars/" + quote(calendar_id, safe="") + "/events",
                                   params={"timeMin": time_min, "timeMax": time_max, "singleEvents": "true", "orderBy": "startTime", "maxResults": 100, "q": query[:2000]})
 

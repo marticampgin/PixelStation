@@ -91,6 +91,12 @@ class WebProvider:
             return {"available": False, "endpoint": url, "message": "SearXNG is unavailable. Start the optional Compose service and enable JSON search."}
 
     async def search(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
+        try:
+            return await asyncio.wait_for(self._search(query, limit), timeout=25)
+        except TimeoutError as exc:
+            raise IntegrationError("SearXNG search exceeded its 25-second total limit.", "search_timeout") from exc
+
+    async def _search(self, query: str, limit: int) -> list[dict[str, Any]]:
         query = query.strip()
         if not query or len(query) > 2000:
             raise IntegrationError("Search query must contain 1–2000 characters.", "invalid_query", 422)
@@ -111,8 +117,12 @@ class WebProvider:
                     payload = json.loads(raw)
         except (httpx.HTTPError, ValueError) as exc:
             raise IntegrationError("SearXNG search failed. Check its endpoint, connection and JSON configuration.", "search_failed") from exc
+        if not isinstance(payload, dict) or not isinstance(payload.get("results", []), list):
+            raise IntegrationError("SearXNG returned an invalid JSON search response.", "invalid_search_response")
         results, seen = [], set()
         for item in payload.get("results", []):
+            if not isinstance(item, dict):
+                continue
             try:
                 raw_url = str(item.get("url", ""))
                 parsed = urlsplit(raw_url)
@@ -143,7 +153,7 @@ class WebProvider:
                 ips = [str(v) for v in values]
             else:
                 infos = await asyncio.to_thread(socket.getaddrinfo, host, port, type=socket.SOCK_STREAM)
-                ips = list({info[4][0] for info in infos})
+                ips = list({str(info[4][0]) for info in infos})
             if not ips or any(not ipaddress.ip_address(ip).is_global for ip in ips):
                 raise ValueError("non-public address")
             # Pin the checked address: DNS cannot resolve again between validation and connection.
@@ -157,7 +167,10 @@ class WebProvider:
             raise IntegrationError("Only public HTTP(S) webpages on ports 80/443 can be fetched; local and reserved addresses are blocked.", "unsafe_url", 422) from exc
 
     async def fetch(self, url: str, max_characters: int = 20_000) -> dict[str, Any]:
-        key = canonical_url(url)
+        try:
+            key = canonical_url(url)
+        except ValueError as exc:
+            raise IntegrationError("Use a valid public HTTP(S) URL.", "unsafe_url", 422) from exc
         cached = self.cache.get(key)
         if cached and time.monotonic() - cached[0] < 300:
             return {**cached[1], "text": cached[1]["text"][:max_characters]}
@@ -186,7 +199,11 @@ class WebProvider:
                     content_type = response.headers.get("content-type", "").split(";")[0].lower()
                     if content_type not in {"text/html", "application/xhtml+xml", "text/plain"}:
                         raise IntegrationError("This URL is not an HTML or text webpage. Attach document files through Files.", "unsupported_content", 422)
-                    if int(response.headers.get("content-length", "0")) > 2_000_000:
+                    try:
+                        declared_length = int(response.headers.get("content-length", "0"))
+                    except ValueError:
+                        declared_length = 0
+                    if declared_length > 2_000_000:
                         raise IntegrationError("Webpage exceeds the 2 MB download limit.", "response_too_large", 422)
                     raw = bytearray()
                     async for chunk in response.aiter_bytes():
@@ -204,16 +221,28 @@ class WebProvider:
                     return {"url": current, "requested_url": original, "title": title, "text": decoded[:40_000], "characters": len(decoded)}
         raise IntegrationError("Webpage exceeded the redirect limit.", "redirect_limit", 422)
 
-    async def research(self, queries: list[str], limit: int = 4) -> dict[str, Any]:
+    async def research(self, queries: list[str], limit: int = 4, max_steps: int | None = None) -> dict[str, Any]:
         queries = list(dict.fromkeys(q.strip() for q in queries if q.strip()))
         if not 1 <= len(queries) <= 4:
             raise IntegrationError("Research requires 1–4 distinct queries.", "invalid_queries", 422)
+        budget = 6 if max_steps is None else max_steps
+        if not 1 <= budget <= 12:
+            raise IntegrationError("Web tool budget must be from 1–12 steps.", "invalid_budget", 422)
+        search_count = min(len(queries), budget)
+        # Keep two focused searches for complex research when capacity permits.
+        # At three or more steps, reserve one request for reading real evidence.
+        if budget >= 3 and search_count == budget and search_count > 2:
+            search_count -= 1
+        queries = queries[:search_count]
         batches = await asyncio.gather(*(self.search(q, 6) for q in queries))
         unique = {r["url"]: r for batch in batches for r in batch}
         results = list(unique.values())[:min(max(limit, 1), 6)]
-        fetched = await asyncio.gather(*(self.fetch(r["url"], 8000) for r in results), return_exceptions=True)
+        fetch_count = min(len(results), max(0, budget - search_count))
+        fetched = await asyncio.gather(*(self.fetch(r["url"], 8000) for r in results[:fetch_count]), return_exceptions=True)
         sources = []
-        for result, page in zip(results, fetched, strict=True):
-            sources.append({**result, "text": page["text"] if isinstance(page, dict) else "", "fetch_error": str(page) if isinstance(page, Exception) else None})
-        return {"queries": queries, "sources": sources, "context": "\n\n".join(
+        for index, result in enumerate(results):
+            page = fetched[index] if index < len(fetched) else None
+            sources.append({**result, "text": page["text"] if isinstance(page, dict) else "", "fetch_error": str(page) if isinstance(page, Exception) else None,
+                            "fetched": isinstance(page, dict)})
+        return {"queries": queries, "sources": sources, "tool_steps": {"search": search_count, "fetch": fetch_count, "total": search_count + fetch_count, "budget": budget}, "context": "\n\n".join(
             f"[{i}] {s['title']}\n{s['url']}\n{s['text'] or s['snippet']}" for i, s in enumerate(sources, 1))[:32_000]}
