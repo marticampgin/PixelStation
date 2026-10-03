@@ -20,7 +20,13 @@ from sqlalchemy import ForeignKey, Text, select, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .database import Attachment, Base, DocumentChunk, new_id, now, record_dict
-from .files import LocalFileWriter, NativeFileParser, chunk_sections, validate_content
+from .files import (
+    LocalFileWriter,
+    NativeFileParser,
+    chunk_sections,
+    validate_content,
+    write_file_metadata,
+)
 
 EDITABLE = {".txt", ".md", ".markdown", ".csv", ".xlsx", ".docx", ".pdf"}
 MAX_CONTENT = 1_000_000
@@ -301,10 +307,7 @@ class FileEditService:
                 row.parser, row.parse_status, row.parse_error = "native-edit", "ready", None
                 for chunk in chunks:
                     row.chunks.append(DocumentChunk(**chunk))
-                (folder / "parsed.json").write_text(json.dumps(chunks, ensure_ascii=False), encoding="utf-8")
-                (folder / "metadata.json").write_text(json.dumps({"filename": row.filename,
-                    "sha256": row.sha256, "size": row.size, "parser": row.parser,
-                    "parse_status": row.parse_status}), encoding="utf-8")
+                write_file_metadata(row, chunks)
                 proposal.status = "consumed"
                 session.commit()
                 return {**record_dict(row), "revision_id": session.scalar(select(FileRevision.id).where(FileRevision.proposal_id == proposal.id))}

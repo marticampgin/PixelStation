@@ -304,15 +304,23 @@ def ingest(
     extension = Path(filename).suffix.lower()
     validate_content(content, extension)
     digest = hashlib.sha256(content).hexdigest()
-    old = session.scalar(
-        select(Attachment).where(Attachment.sha256 == digest, Attachment.extension == extension)
+    matching = select(Attachment).where(
+        Attachment.sha256 == digest, Attachment.extension == extension
     )
+    if source == "generated":
+        # Artifact names belong to records; identical immutable bytes may be shared by many records.
+        matching = matching.where(Attachment.source == source, Attachment.filename == filename)
+    old = session.scalar(matching.order_by(Attachment.created_at))
     if old:
         return old
     folder = data_dir / "files" / digest
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"original{extension}"
-    path.write_bytes(content)
+    if path.exists():
+        if not path.is_file() or path.read_bytes() != content:
+            raise ValueError("Stored content-addressed file contains different data")
+    else:
+        path.write_bytes(content)
     row = Attachment(
         filename=filename,
         sha256=digest,
@@ -324,6 +332,7 @@ def ingest(
     )
     session.add(row)
     session.flush()
+    chunks = []
     try:
         sections, row.parser, row.parse_error = DocumentParser().parse(path, extension)
         chunks = chunk_sections(sections)
@@ -332,25 +341,34 @@ def ingest(
         )
         for chunk in chunks:
             session.add(DocumentChunk(attachment_id=row.id, **chunk))
-        (folder / "parsed.json").write_text(
-            json.dumps(chunks, ensure_ascii=False), encoding="utf-8"
-        )
     except Exception as exc:
         row.parse_status, row.parse_error = "error", str(exc)[:1000]
-    (folder / "metadata.json").write_text(
-        json.dumps(
-            {
-                "filename": filename,
-                "sha256": digest,
-                "size": len(content),
-                "parser": row.parser,
-                "parse_status": row.parse_status,
-            }
-        ),
-        encoding="utf-8",
-    )
+    write_file_metadata(row, chunks)
     session.commit()
     return row
+
+
+def write_file_metadata(row: Attachment, chunks: list[dict]) -> None:
+    """Keep per-record names and parse metadata separate from shared immutable bytes."""
+    folder = Path(row.path).parent
+    record_folder = folder / "records" / row.id
+    record_folder.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        "id": row.id,
+        "filename": row.filename,
+        "sha256": row.sha256,
+        "size": row.size,
+        "source": row.source,
+        "parser": row.parser,
+        "parse_status": row.parse_status,
+    }
+    for name, value in (("parsed.json", chunks), ("metadata.json", metadata)):
+        serialized = json.dumps(value, ensure_ascii=False)
+        (record_folder / name).write_text(serialized, encoding="utf-8")
+        # Preserve existing legacy readers without replacing another artifact's sidecars.
+        legacy = folder / name
+        if not legacy.exists():
+            legacy.write_text(serialized, encoding="utf-8")
 
 
 def retrieve_files(

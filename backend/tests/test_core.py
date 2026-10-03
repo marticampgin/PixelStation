@@ -442,6 +442,106 @@ def test_file_creation_backup_export_harness(client):
     assert isinstance(report["regression_candidates"], list)
 
 
+def test_generated_names_share_bytes_with_independent_records_and_safe_deletion(client):
+    from pathlib import Path
+
+    content = "task,status\nlocal chat,verified\nPoker,verified"
+    first = client.post(
+        "/api/files/create",
+        json={"filename": "functionality-check.csv", "format": "csv", "content": content},
+    ).json()
+    original_bytes = client.get(f"/api/files/{first['id']}/content").content
+    assert original_bytes.decode().splitlines() == content.splitlines()
+    original_metadata = (Path(first["path"]).parent / "metadata.json").read_bytes()
+    second = client.post(
+        "/api/files/create",
+        json={"filename": "functionality-final.csv", "format": "csv", "content": content},
+    ).json()
+    assert first["id"] != second["id"]
+    assert first["path"] == second["path"]
+    assert first["sha256"] == second["sha256"]
+    for row, filename in ((first, "functionality-check.csv"), (second, "functionality-final.csv")):
+        stored = client.get(f"/api/files/{row['id']}").json()
+        assert stored["filename"] == filename
+        assert stored["chunks"]
+        download = client.get(f"/api/files/{row['id']}/content")
+        assert download.content == original_bytes
+        assert filename in download.headers["content-disposition"]
+        sidecar = Path(row["path"]).parent / "records" / row["id"] / "metadata.json"
+        assert json.loads(sidecar.read_text())["filename"] == filename
+    assert (Path(first["path"]).parent / "metadata.json").read_bytes() == original_metadata
+    repeated = client.post(
+        "/api/files/create",
+        json={"filename": "functionality-final.csv", "format": "csv", "content": content},
+    ).json()
+    assert repeated["id"] == second["id"]
+    assert client.delete(f"/api/files/{first['id']}?confirmed=true").status_code == 200
+    assert client.get(f"/api/files/{first['id']}").status_code == 404
+    remaining = client.get(f"/api/files/{second['id']}").json()
+    assert remaining["filename"] == "functionality-final.csv"
+    assert remaining["chunks"]
+    assert client.get(f"/api/files/{second['id']}/content").content == original_bytes
+
+
+def test_generated_artifact_does_not_inherit_a_matching_uploads_name(client, tmp_path):
+    content = "Name,Amount\nMarta,125"
+    fixture = tmp_path / "fixture.csv"
+    LocalFileWriter().write(fixture, content, "csv")
+    uploaded = client.post(
+        "/api/files/upload", files={"file": ("uploaded.csv", fixture.read_bytes())}
+    ).json()
+    generated = client.post(
+        "/api/files/create",
+        json={"filename": "generated.csv", "format": "csv", "content": content},
+    ).json()
+    assert generated["id"] != uploaded["id"]
+    assert generated["filename"] == "generated.csv"
+    assert generated["source"] == "generated"
+    assert generated["path"] == uploaded["path"]
+    again = client.post(
+        "/api/files/upload", files={"file": ("renamed-upload.csv", fixture.read_bytes())}
+    ).json()
+    assert again["id"] == uploaded["id"]
+
+
+def test_editing_shared_generated_blob_preserves_other_artifact_and_revision(client):
+    from pathlib import Path
+
+    content = "task,status\nlocal chat,verified"
+    rows = [
+        client.post(
+            "/api/files/create", json={"filename": name, "format": "csv", "content": content}
+        ).json()
+        for name in ("first.csv", "second.csv")
+    ]
+    first, second = rows
+    original_bytes = client.get(f"/api/files/{second['id']}/content").content
+    original_sidecar = Path(second["path"]).parent / "records" / second["id"] / "metadata.json"
+    original_metadata = original_sidecar.read_bytes()
+    proposal = client.post(
+        f"/api/files/{first['id']}/edit-proposals",
+        json={"content": "task,status\nlocal chat,reviewed"},
+    ).json()
+    edited = client.post(
+        f"/api/files/edit-proposals/{proposal['id']}/confirm", json={"confirmed": True}
+    )
+    assert edited.status_code == 200, edited.text
+    edited_row = edited.json()
+    assert edited_row["filename"] == "first.csv"
+    assert edited_row["path"] != second["path"]
+    assert client.get(f"/api/files/{second['id']}/content").content == original_bytes
+    assert original_sidecar.read_bytes() == original_metadata
+    edited_metadata = Path(edited_row["path"]).parent / "records" / first["id"] / "metadata.json"
+    assert json.loads(edited_metadata.read_text())["filename"] == "first.csv"
+    revisions = client.get(f"/api/files/{first['id']}/revisions").json()
+    assert (
+        client.get(f"/api/files/{first['id']}/revisions/{revisions[0]['id']}/content").content
+        == original_bytes
+    )
+    assert client.delete(f"/api/files/{first['id']}?confirmed=true").status_code == 200
+    assert client.get(f"/api/files/{second['id']}/content").content == original_bytes
+
+
 def test_structural_chunking_and_safe_filenames():
     chunks = chunk_sections(
         [{"text": "# Title\n\n" + ("word " * 1000), "location": "page 1", "page": 1, "heading": ""}]
