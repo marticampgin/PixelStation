@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from copy import deepcopy
 
 import httpx
 import pytest
@@ -12,7 +13,7 @@ from test_poker_api import PokerLLM, make_app
 
 from pixel_station.database import AgentRun
 from pixel_station.observability import observe_provider, provider_observations
-from pixel_station.poker import act, new_game, public_view, run_bots
+from pixel_station.poker import GameSession, act, new_game, public_view, run_bots
 
 
 def stream_step(client, table):
@@ -95,6 +96,19 @@ def test_all_in_runout_reveals_one_street_at_a_time_then_showdown(tmp_path):
         table = client.post(
             "/api/poker/sessions?progressive=true", json={"seats": 2, "stack": 100}
         ).json()
+        # This test isolates the all-in runout. Give the responding bot a premium
+        # hand so the new price-aware policy has a reason to call the shove.
+        with app.state.database.session() as session:
+            record = session.get(GameSession, table["id"])
+            state = deepcopy(record.state)
+            aces = [
+                card for card in ("As", "Ah", "Ad", "Ac") if card not in state["seats"][0]["hole"]
+            ][:2]
+            available = state["deck"] + state["seats"][1]["hole"]
+            state["seats"][1]["hole"] = aces
+            state["deck"] = [card for card in available if card not in aces]
+            record.state = state
+            session.commit()
         table = client.post(
             f"/api/poker/sessions/{table['id']}/actions?progressive=true",
             json={"action": "all_in", "expected_sequence": table["event_sequence"]},

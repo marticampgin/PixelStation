@@ -75,6 +75,15 @@ def public_run(row: AgentRun, include_content=False) -> dict:
         "tool_workflow_count",
         "budget_scope",
         "provider_calls",
+        "strategy_version",
+        "strategy_stage",
+        "selected_action",
+        "decision_basis",
+        "policy_rejections",
+        "provider_call_attempts",
+        "raw_actions",
+        "generation_tokens_per_attempt",
+        "strategy_measurements",
     }
     result["metrics"] = {key: value for key, value in metrics.items() if key in allowed}
     result["metrics_available"] = bool(metrics)
@@ -140,6 +149,12 @@ def measurements(session, settings) -> dict:
         )
         for row in instrumented
     )
+    poker_decisions = [
+        row.evidence["metrics"]
+        for row in instrumented
+        if row.route == "poker_bot" and row.evidence["metrics"].get("selected_action")
+    ]
+    preflop = [item for item in poker_decisions if item.get("strategy_stage") == "preflop"]
     events = Counter(
         session.scalars(
             select(FrictionEvent.kind)
@@ -160,6 +175,23 @@ def measurements(session, settings) -> dict:
         "completion_rate": outcomes["complete"] / len(terminal) if terminal else None,
         "repair_attempts": repairs,
         "fallbacks": fallbacks,
+        "poker_strategy": {
+            "sample_count": len(poker_decisions),
+            "actions": dict(Counter(item["selected_action"] for item in poker_decisions)),
+            "native_without_fallback": sum(
+                not item.get("fallback_count") for item in poker_decisions
+            ),
+            "fallback_decisions": sum(bool(item.get("fallback_count")) for item in poker_decisions),
+            "preflop_samples": len(preflop),
+            "preflop_all_ins": sum(item["selected_action"] == "all_in" for item in preflop),
+            "raw_preflop_all_in_attempts": sum(
+                item.get("raw_actions", []).count("all_in") for item in preflop
+            ),
+            "validation_rejections": sum(
+                item.get("validation_rejections", 0) for item in poker_decisions
+            ),
+            "note": "Newly measured decisions only; counts describe observed behavior, not poker skill or optimal frequencies.",
+        },
         "latency_ms": distribution([row.latency_ms for row in timed]),
         "first_public_token_ms": distribution(
             [

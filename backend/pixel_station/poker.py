@@ -8,6 +8,7 @@ import time
 from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Literal
 
 import httpx
@@ -131,11 +132,11 @@ def new_game(
         raise ValueError("Use 2–6 seats and positive blinds below the starting stack")
     personalities = [
         "balanced",
-        "conservative",
-        "aggressive",
-        "unpredictable",
+        "value_focused",
+        "position_aware",
+        "selective_pressure",
         "balanced",
-        "conservative",
+        "patient",
     ]
     state = {
         "id": new_id(),
@@ -457,7 +458,314 @@ class StepRequest(BaseModel):
 
 
 class BotChoice(ActionRequest):
-    reason_short: str = Field(default="", max_length=300)
+    decision_basis: Literal["value", "price", "free_check", "fold", "small_bluff"] | None = None
+
+
+@dataclass
+class BotDecision:
+    choice: BotChoice
+    metrics: dict
+
+
+def bot_decision_view(view: dict) -> dict:
+    """Allowlisted public facts and only the acting seat's private cards."""
+    actor = view["actor"]
+    fields = (
+        "stage",
+        "board",
+        "dealer",
+        "actor",
+        "small_blind",
+        "big_blind",
+        "pot",
+        "legal_actions",
+    )
+    result = {key: deepcopy(view[key]) for key in fields if key in view}
+    result["seats"] = [
+        {
+            **{
+                key: seat[key]
+                for key in ("index", "name", "stack", "bet", "contribution", "folded", "all_in")
+                if key in seat
+            },
+            "hole": list(seat.get("hole", [])) if seat["index"] == actor else [],
+        }
+        for seat in view["seats"]
+    ]
+    result["history"] = [
+        {key: item[key] for key in ("seat", "stage", "action", "amount") if key in item}
+        for item in view.get("history", [])[-16:]
+    ]
+    result["style"] = (
+        "balanced",
+        "value_focused",
+        "position_aware",
+        "selective_pressure",
+        "balanced",
+        "patient",
+    )[actor % 6]
+    return result
+
+
+def validate_bot_choice(view: dict, context: dict, choice: BotChoice) -> str | None:
+    """Validate game legality and the bot's separate conservative risk policy."""
+    option = next((item for item in view["legal_actions"] if item["action"] == choice.action), None)
+    if option is None:
+        return "illegal_action"
+    if choice.action == "fold" and any(row["action"] == "check" for row in view["legal_actions"]):
+        return "fold_with_free_check"
+    if choice.action == "raise" and (
+        choice.amount is None or not option["min"] <= choice.amount <= option["max"]
+    ):
+        return "illegal_raise_amount"
+    hero = next(seat for seat in view["seats"] if seat["index"] == view["actor"])
+    stack, bet = hero["stack"], hero.get("bet", 0)
+    payment = (
+        choice.amount - bet
+        if choice.action == "raise" and choice.amount is not None
+        else stack
+        if choice.action == "all_in"
+        else min(context["observed"]["to_call"], stack)
+        if choice.action == "call"
+        else 0
+    )
+    tier = context["hand"]["preflop_tier"]
+    equity = context["simulation"]["equity_share_estimate"]
+    deep = (stack + bet) / max(1, view.get("big_blind", 10)) > 20
+    if (
+        view["stage"] == "preflop"
+        and deep
+        and tier in {"weak", "marginal"}
+        and payment > stack * 0.35
+    ):
+        return "preflop_commitment_without_strong_hand"
+    raise_ceiling = context["guidance"]["raise_total_max"]
+    if choice.action == "raise" and (raise_ceiling is None or choice.amount > raise_ceiling):
+        return "raise_above_risk_budget"
+    if choice.action == "all_in":
+        short_premium = view["stage"] == "preflop" and not deep and tier in {"strong", "premium"}
+        substantial_value = (
+            tier == "premium"
+            and (context["observed"]["to_call"] >= stack * 0.3 or view["pot"] >= stack * 0.6)
+            if view["stage"] == "preflop"
+            else equity >= 0.72
+            and (view["pot"] >= stack or context["observed"]["to_call"] >= stack * 0.3)
+        )
+        priced_call = (
+            context["observed"]["to_call"] >= stack
+            and equity >= context["observed"]["pot_odds"] + 0.05
+        )
+        if not (short_premium or substantial_value or priced_call):
+            return "stack_commitment_without_value_or_price"
+    if (
+        choice.action == "call"
+        and payment >= max(1, view.get("big_blind", 10) * 3)
+        and not (view["stage"] == "preflop" and tier == "premium")
+        and equity < context["observed"]["pot_odds"] + 0.04
+    ):
+        return "call_price_exceeds_equity_margin"
+    return None
+
+
+def fallback_bot_choice(view: dict, context: dict) -> BotChoice:
+    legal = {item["action"] for item in view["legal_actions"]}
+    candidates: list[BotChoice] = []
+    # Preserve value play as well as restraint: fallback is not an unconditional call.
+    if (view["stage"] == "preflop" and context["hand"]["preflop_tier"] == "premium") or (
+        view["stage"] != "preflop" and context["simulation"]["equity_share_estimate"] >= 0.72
+    ):
+        candidates.extend(
+            BotChoice(action="raise", amount=amount, decision_basis="value")
+            for amount in context["guidance"]["raise_candidates"]
+        )
+    if "check" in legal:
+        candidates.append(BotChoice(action="check", decision_basis="free_check"))
+    if context["simulation"]["equity_share_estimate"] >= context["observed"]["pot_odds"] + 0.04:
+        candidates.append(BotChoice(action="call", decision_basis="price"))
+    candidates.append(BotChoice(action="fold", decision_basis="fold"))
+    return next(
+        choice for choice in candidates if validate_bot_choice(view, context, choice) is None
+    )
+
+
+async def choose_bot_action(
+    app, view: dict, settings, *, on_phase=None, timeout_seconds=15
+) -> BotDecision:
+    """One bounded structured judgment, one repair; no reasoning narrative is retained."""
+    from .poker_strategy import STRATEGY_VERSION, strategy_context
+
+    started = time.perf_counter()
+    sanitized = bot_decision_view(view)
+    deadline = started + max(0, timeout_seconds)
+    observed: list[dict] = []
+    metrics = {
+        "strategy_version": STRATEGY_VERSION,
+        "repair_count": 0,
+        "fallback_count": 0,
+        "validation_rejections": 0,
+        "policy_rejections": [],
+        "provider_call_attempts": 0,
+        "provider_calls": observed,
+        "strategy_stage": sanitized["stage"],
+        "raw_actions": [],
+    }
+    try:
+        async with asyncio.timeout(max(0, deadline - time.perf_counter())):
+            context = await asyncio.to_thread(strategy_context, sanitized)
+    except TimeoutError:
+        # No evidence was produced within the budget; do not invent equity or price.
+        action: Literal["check", "fold"] = (
+            "check"
+            if any(row["action"] == "check" for row in sanitized["legal_actions"])
+            else "fold"
+        )
+        emergency_choice = BotChoice(
+            action=action, decision_basis="free_check" if action == "check" else "fold"
+        )
+        metrics.update(
+            fallback_count=1,
+            policy_rejections=["ContextTimeout"],
+            selected_action=action,
+            decision_basis=emergency_choice.decision_basis,
+            generation_tokens_per_attempt=180,
+        )
+        return BotDecision(choice=emergency_choice, metrics=metrics)
+    scope = provider_observations.set(observed)
+    model = settings.roles.get("primary_chat", "")
+    rejection = ""
+    choice = None
+    hero = next(row for row in sanitized["seats"] if row["index"] == sanitized["actor"])
+    # Keep the inference view compact and put the acting hand directly beside its price.
+    # Detailed estimator assumptions remain in source/diagnostics; the prompt states them.
+    model_context = {
+        "observed": context["observed"],
+        "hand": {key: value for key, value in context["hand"].items() if key != "tier_method"},
+        "simulation": {
+            key: context["simulation"][key]
+            for key in ("equity_share_estimate", "sample_standard_error", "samples")
+        },
+        "guidance": {
+            key: context["guidance"][key]
+            for key in (
+                "stack_regime",
+                "max_voluntary_commitment",
+                "raise_total_min",
+                "raise_total_max",
+                "raise_candidates",
+                "style",
+                "style_aggression_nudge",
+            )
+        },
+    }
+    decision_brief = (
+        f"Your hand is {context['hand']['notation']}. "
+        f"Street={sanitized['stage']}; preflop_tier={context['hand']['preflop_tier']}; "
+        f"made_hand={context['hand']['made_category']}; improves_board={context['hand']['improves_board_hand']}. "
+        f"Estimated equity={context['simulation']['equity_share_estimate']}; "
+        f"call_cost={context['observed']['call_cost']}; pot_odds={context['observed']['pot_odds']}. "
+        f"For any raise choose a TOTAL amount from {context['guidance']['raise_candidates']}, "
+        f"never above {context['guidance']['raise_total_max']}. Assess THIS hand now."
+    )
+
+    async def generate_choice(attempt: int) -> BotChoice:
+        metrics["repair_count"] += int(attempt > 0)
+        metrics["provider_call_attempts"] += 1
+        return await app.state.llm.structured(
+            model,
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "Choose one no-limit Hold'em action after assessing decision_context. "
+                        "Compare hand/board strength, position, opponents, pot odds and chips at risk. "
+                        "Apply these principles in order:\n"
+                        "1. PRE-FLOP: premium hands in unopened pots raise for value at a raise_candidate. "
+                        "Short strong/premium stacks facing normal opens may raise or all_in. "
+                        "Weak hands facing raises usually fold; weak cards are not value raises.\n"
+                        "2. POST-FLOP: disregard preflop_tier. If your cards improve the board and estimated equity "
+                        "is very high (above 0.85), take value with a raise_candidate. "
+                        "A river nut hand should bet when an opponent can pay, rather than check or fold.\n"
+                        "3. Otherwise check if free, call only at a sensible price, or fold to pressure. "
+                        "Do not fold when checking is free. Do not jam deep stacks into small pots. "
+                        "Equity uses random opponents, not their actual range: raises can mean stronger cards. "
+                        "It is a noisy estimate, not solved EV. "
+                        "Style is only a small tie breaker, never a reason to ignore the evidence or risk limits. "
+                        "Choose only a listed legal action within guidance. Raise amounts are TOTAL round bets. "
+                        "Return JSON action, amount (null unless raising), and a decision_basis label "
+                        "(value, price, free_check, fold or small_bluff). No reasoning narrative. "
+                        'For example a value bet is {"action":"raise","amount":TOTAL_BET,"decision_basis":"value"}.'
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            **sanitized,
+                            "your_cards": hero["hole"],
+                            "decision_context": model_context,
+                            "decision_brief": decision_brief,
+                        }
+                    )
+                    + (
+                        f"\nPrevious action failed validation: {rejection}. Reassess the evidence and risk limits."
+                        if attempt
+                        else ""
+                    ),
+                },
+            ],
+            BotChoice,
+            validation_retries=0,
+            options={
+                "num_ctx": min(settings.context_tokens, 8192),
+                "num_predict": 180,
+                "temperature": 0.35,
+            },
+        )
+
+    try:
+        for attempt in range(2):
+            remaining = deadline - time.perf_counter()
+            if not model or remaining <= 0:
+                break
+            try:
+                async with asyncio.timeout(remaining):
+                    if on_phase:
+                        await on_phase("queued", sanitized["actor"])
+                    async with app.state.model_queue.lock:
+                        if on_phase:
+                            await on_phase("choosing", sanitized["actor"])
+                        candidate = await generate_choice(attempt)
+                metrics["raw_actions"].append(candidate.action)
+                rejection = validate_bot_choice(sanitized, context, candidate) or ""
+                if not rejection:
+                    choice = candidate
+                    break
+                metrics["validation_rejections"] += 1
+                metrics["policy_rejections"].append(rejection)
+            except asyncio.CancelledError:
+                raise
+            except (TimeoutError, ValueError, RuntimeError, httpx.HTTPError) as error:
+                rejection = type(error).__name__
+                metrics["validation_rejections"] += 1
+                metrics["policy_rejections"].append(rejection)
+        if choice is None:
+            choice = fallback_bot_choice(sanitized, context)
+            metrics["fallback_count"] = 1
+        metrics.update(
+            {
+                "selected_action": choice.action,
+                "decision_basis": choice.decision_basis,
+                "generation_tokens_per_attempt": 180,
+                "strategy_measurements": {
+                    "equity_share_estimate": context["simulation"]["equity_share_estimate"],
+                    "samples": context["simulation"]["samples"],
+                    "pot_odds": context["observed"]["pot_odds"],
+                },
+            }
+        )
+        return BotDecision(choice=choice, metrics=metrics)
+    finally:
+        provider_observations.reset(scope)
 
 
 async def run_bots(
@@ -474,127 +782,56 @@ async def run_bots(
     phase_started = time.monotonic()
     deadline = phase_started + max(0, BOT_TIME_BUDGET - state.get("opponent_compute_seconds", 0))
 
-    async def infer(model: str, actor: int, settings, attempt: int) -> BotChoice:
-        if on_phase:
-            await on_phase("queued", actor)
-        async with request.app.state.model_queue.lock:
-            if on_phase:
-                await on_phase("choosing", actor)
-            return await request.app.state.llm.structured(
-                model,
-                [
-                    {
-                        "role": "system",
-                        "content": f"You play no-limit Texas Hold'em with a {state['seats'][actor]['personality']} style. Choose only a listed legal action. Raise amounts are total round bets. Never invent cards. Return JSON.",
-                    },
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            {
-                                key: value
-                                for key, value in public_view(state, actor).items()
-                                if key not in {"event_log", "event_sequence", "phase", "needs_step"}
-                            }
-                        )
-                        + (
-                            "\nPrevious action failed validation. Select a legal option."
-                            if attempt
-                            else ""
-                        ),
-                    },
-                ],
-                BotChoice,
-                validation_retries=0,
-                options={
-                    "num_ctx": min(settings.context_tokens, 8192),
-                    "num_predict": 150,
-                    "temperature": 0.5,
-                },
-            )
-
     for step in range(100):
         actor = state.get("actor")
         if state["completed"] or actor in {None, 0}:
             return errors
-        observations: list[dict] = []
-        metrics_scope = provider_observations.set(observations)
+        decision_started = time.monotonic()
+        settings = request.app.state.settings()
+        model = settings.roles.get("primary_chat", "")
+        budget = min(15, max(0, deadline - time.monotonic()))
+        if state.get("opponent_action_count", 0) + step >= BOT_MAX_MODEL_ACTIONS:
+            budget = 0
         try:
-            options = legal_actions(state)
-            decision_started = time.monotonic()
-            repairs = 0
-            choice = None
-            settings = request.app.state.settings()
-            model = settings.roles.get("primary_chat", "")
-            for attempt in range(2):
-                if (
-                    not model
-                    or time.monotonic() >= deadline
-                    or (state.get("opponent_action_count", 0) + step >= BOT_MAX_MODEL_ACTIONS)
-                ):
-                    break
-                try:
-                    repairs += int(attempt > 0)
-                    validated_choice: BotChoice = await asyncio.wait_for(
-                        infer(model, actor, settings, attempt),
-                        timeout=min(15, max(0.1, deadline - time.monotonic())),
-                    )
-                    act(
-                        state,
-                        validated_choice.action,
-                        validated_choice.amount,
-                        settle=not defer_settle,
-                    )
-                    choice = validated_choice
-                    break
-                except asyncio.CancelledError:
-                    record_observation(
-                        request.app,
-                        route="poker_bot",
-                        model=model or None,
-                        status="interrupted",
-                        latency_ms=int((time.monotonic() - decision_started) * 1000),
-                        metrics={
-                            "repair_count": repairs,
-                            "fallback_count": 0,
-                            "bot_actions": 0,
-                            "provider_calls": observations,
-                        },
-                    )
-                    raise
-                except (TimeoutError, ValueError, RuntimeError, httpx.HTTPError) as error:
-                    errors.append(f"Invalid or unavailable poker model action: {str(error)[:200]}")
-                    choice = None
-            if choice is None:
-                legal = {option["action"] for option in options}
-                act(
-                    state,
-                    "check" if "check" in legal else "call" if "call" in legal else "fold",
-                    settle=not defer_settle,
-                )
-                state["model_status"] = (
-                    "Some opponents used legal fallback actions because local inference was unavailable or exceeded its budget."
-                )
+            decision = await choose_bot_action(
+                request.app,
+                public_view(state, actor),
+                settings,
+                on_phase=on_phase,
+                timeout_seconds=budget,
+            )
+        except asyncio.CancelledError:
             record_observation(
                 request.app,
                 route="poker_bot",
                 model=model or None,
-                status="complete",
+                status="interrupted",
                 latency_ms=int((time.monotonic() - decision_started) * 1000),
-                metrics={
-                    "repair_count": repairs,
-                    "fallback_count": int(choice is None),
-                    "bot_actions": 1,
-                    "provider_calls": observations,
-                },
+                metrics={"bot_actions": 0},
             )
-            if max_actions is not None and step + 1 >= max_actions:
-                state["opponent_action_count"] = state.get("opponent_action_count", 0) + step + 1
-                state["opponent_compute_seconds"] = state.get("opponent_compute_seconds", 0) + (
-                    time.monotonic() - phase_started
-                )
-                return errors
-        finally:
-            provider_observations.reset(metrics_scope)
+            raise
+        act(state, decision.choice.action, decision.choice.amount, settle=not defer_settle)
+        errors.extend(
+            f"Poker decision rejected: {code}" for code in decision.metrics["policy_rejections"]
+        )
+        if decision.metrics["fallback_count"]:
+            state["model_status"] = (
+                "Some opponents used an evidence-based legal fallback after an invalid, risky or unavailable model decision."
+            )
+        record_observation(
+            request.app,
+            route="poker_bot",
+            model=model or None,
+            status="complete",
+            latency_ms=int((time.monotonic() - decision_started) * 1000),
+            metrics={**decision.metrics, "bot_actions": 1},
+        )
+        if max_actions is not None and step + 1 >= max_actions:
+            state["opponent_action_count"] = state.get("opponent_action_count", 0) + step + 1
+            state["opponent_compute_seconds"] = state.get("opponent_compute_seconds", 0) + (
+                time.monotonic() - phase_started
+            )
+            return errors
     raise RuntimeError("Poker action budget exceeded")
 
 

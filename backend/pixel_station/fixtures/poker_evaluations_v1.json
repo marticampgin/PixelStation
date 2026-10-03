@@ -1,0 +1,128 @@
+{
+  "version": "pixel-station-poker-strategy-v1",
+  "description": "Public synthetic risk checks, not recovered user hands or a proof of optimal poker strategy. Opponent cards and future cards are absent. Multiple reasonable actions are accepted where appropriate; premium/value cases prevent an always-fold policy from passing.",
+  "scenarios": [
+    {
+      "id": "weak_deep_open_pressure",
+      "label": "Synthetic 72 offsuit: deep stack facing an open",
+      "stage": "preflop", "actor": 2, "dealer": 0,
+      "hole": ["7d", "2c"], "board": [],
+      "current_bet": 30, "last_raise": 20,
+      "seats": [
+        {"stack": 970, "bet": 30, "contribution": 30},
+        {"stack": 995, "bet": 5, "contribution": 5, "folded": true},
+        {"stack": 990, "bet": 10, "contribution": 10},
+        {"stack": 970, "bet": 30, "contribution": 30}
+      ],
+      "history": [
+        {"seat": 1, "action": "small_blind", "amount": 5},
+        {"seat": 2, "action": "big_blind", "amount": 10},
+        {"seat": 3, "action": "raise", "amount": 30},
+        {"seat": 0, "action": "call", "amount": 30},
+        {"seat": 1, "action": "fold", "amount": 0}
+      ],
+      "expected_context": {"to_call": 20, "hero_stack_bb": 99, "preflop_tier": "weak", "weak_deep_jam_discouraged": true},
+      "criteria": {"allowed_actions": ["fold", "call"], "max_paid": 20},
+      "admissible_examples": [{"action": "fold"}, {"action": "call"}],
+      "rejected_legal_example": {"action": "all_in"}
+    },
+    {
+      "id": "weak_deep_reraise_pressure",
+      "label": "Synthetic J2 offsuit: deep stack facing a re-raise",
+      "stage": "preflop", "actor": 1, "dealer": 0,
+      "hole": ["Jd", "2c"], "board": [],
+      "current_bet": 80, "last_raise": 60,
+      "seats": [
+        {"stack": 1000, "bet": 0, "contribution": 0, "folded": true},
+        {"stack": 980, "bet": 20, "contribution": 20},
+        {"stack": 990, "bet": 10, "contribution": 10, "folded": true},
+        {"stack": 920, "bet": 80, "contribution": 80}
+      ],
+      "history": [
+        {"seat": 1, "action": "small_blind", "amount": 5},
+        {"seat": 2, "action": "big_blind", "amount": 10},
+        {"seat": 3, "action": "call", "amount": 10},
+        {"seat": 0, "action": "fold", "amount": 0},
+        {"seat": 1, "action": "raise", "amount": 15},
+        {"seat": 2, "action": "fold", "amount": 0},
+        {"seat": 3, "action": "raise", "amount": 70}
+      ],
+      "expected_context": {"to_call": 60, "hero_stack_bb": 98, "preflop_tier": "weak", "weak_deep_jam_discouraged": true},
+      "criteria": {"allowed_actions": ["fold"], "max_paid": 0},
+      "admissible_examples": [{"action": "fold"}],
+      "rejected_legal_example": {"action": "all_in"}
+    },
+    {
+      "id": "premium_deep_open",
+      "label": "Synthetic pocket aces: deep unopened pot",
+      "stage": "preflop", "actor": 3, "dealer": 0,
+      "hole": ["Ah", "Ad"], "board": [],
+      "current_bet": 10, "last_raise": 10,
+      "seats": [
+        {"stack": 1000, "bet": 0, "contribution": 0},
+        {"stack": 995, "bet": 5, "contribution": 5},
+        {"stack": 990, "bet": 10, "contribution": 10},
+        {"stack": 1000, "bet": 0, "contribution": 0}
+      ],
+      "history": [{"seat": 1, "action": "small_blind", "amount": 5}, {"seat": 2, "action": "big_blind", "amount": 10}],
+      "expected_context": {"to_call": 10, "hero_stack_bb": 100, "preflop_tier": "premium", "weak_deep_jam_discouraged": false},
+      "criteria": {"allowed_actions": ["call", "raise"], "raise_total_min": 20, "raise_total_max": 50, "max_paid": 50},
+      "admissible_examples": [{"action": "call"}, {"action": "raise", "amount": 30}],
+      "rejected_legal_example": {"action": "fold"}
+    },
+    {
+      "id": "premium_short_vs_raise",
+      "label": "Synthetic pocket kings: nine blinds facing an open",
+      "stage": "preflop", "actor": 2, "dealer": 0,
+      "hole": ["Kh", "Kd"], "board": [],
+      "current_bet": 30, "last_raise": 20,
+      "seats": [
+        {"stack": 970, "bet": 30, "contribution": 30},
+        {"stack": 995, "bet": 5, "contribution": 5, "folded": true},
+        {"stack": 80, "bet": 10, "contribution": 10}
+      ],
+      "history": [
+        {"seat": 1, "action": "small_blind", "amount": 5},
+        {"seat": 2, "action": "big_blind", "amount": 10},
+        {"seat": 0, "action": "raise", "amount": 30},
+        {"seat": 1, "action": "fold", "amount": 0}
+      ],
+      "expected_context": {"to_call": 20, "hero_stack_bb": 8, "preflop_tier": "premium", "weak_deep_jam_discouraged": false},
+      "criteria": {"allowed_actions": ["call", "raise", "all_in"], "raise_total_min": 50, "raise_total_max": 90, "max_paid": 80},
+      "admissible_examples": [{"action": "call"}, {"action": "raise", "amount": 50}, {"action": "all_in"}],
+      "rejected_legal_example": {"action": "fold"}
+    },
+    {
+      "id": "river_nut_straight_value",
+      "label": "Synthetic river nut straight: take bounded value",
+      "stage": "river", "actor": 1, "dealer": 1,
+      "hole": ["Ah", "Kd"], "board": ["Qs", "Jh", "Tc", "2s", "3d"],
+      "current_bet": 0, "last_raise": 10,
+      "seats": [
+        {"stack": 750, "bet": 0, "contribution": 250},
+        {"stack": 750, "bet": 0, "contribution": 250}
+      ],
+      "history": [{"seat": 0, "action": "check", "amount": 0}],
+      "expected_context": {"to_call": 0, "hero_stack_bb": 75, "made_category": "Straight"},
+      "criteria": {"allowed_actions": ["raise"], "raise_total_min": 125, "raise_total_max": 500, "max_paid": 500},
+      "admissible_examples": [{"action": "raise", "amount": 125}, {"action": "raise", "amount": 250}, {"action": "raise", "amount": 500}],
+      "rejected_legal_example": {"action": "fold"}
+    },
+    {
+      "id": "river_high_card_vs_bet",
+      "label": "Synthetic river unpaired 72: facing a meaningful bet",
+      "stage": "river", "actor": 1, "dealer": 1,
+      "hole": ["7d", "2c"], "board": ["Ah", "Ks", "Qd", "9c", "3h"],
+      "current_bet": 150, "last_raise": 150,
+      "seats": [
+        {"stack": 650, "bet": 150, "contribution": 350},
+        {"stack": 800, "bet": 0, "contribution": 200}
+      ],
+      "history": [{"seat": 0, "action": "raise", "amount": 150}],
+      "expected_context": {"to_call": 150, "hero_stack_bb": 80, "made_category": "High card"},
+      "criteria": {"allowed_actions": ["fold"], "max_paid": 0},
+      "admissible_examples": [{"action": "fold"}],
+      "rejected_legal_example": {"action": "all_in"}
+    }
+  ]
+}

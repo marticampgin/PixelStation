@@ -24,6 +24,7 @@ export function HarnessPanel({
   const [data, setData] = useState<Watchtower | null>(null);
   const [evaluation, setEvaluation] = useState<Evaluation | null>(null);
   const [native, setNative] = useState(false);
+  const [pokerNative, setPokerNative] = useState(false);
   const [privateDetails, setPrivateDetails] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -61,12 +62,20 @@ export function HarnessPanel({
     };
   }, [evaluation?.id, evaluation?.report.status, load]);
   const running = evaluation?.report.status === 'RUNNING';
+  const nativeScopes = [
+    evaluation?.report.native_requested ? 'chat model' : '',
+    evaluation?.report.poker_native_requested ? 'Poker strategy' : '',
+  ]
+    .filter(Boolean)
+    .join(' and ');
   async function execute(kind: 'report' | 'evaluation') {
     setBusy(true);
     setError('');
     try {
       if (kind === 'evaluation')
-        setEvaluation(await post<Evaluation>('/harness/evaluations', { native }));
+        setEvaluation(
+          await post<Evaluation>('/harness/evaluations', { native, poker_native: pokerNative }),
+        );
       else {
         await post('/harness/run');
         await load();
@@ -78,6 +87,7 @@ export function HarnessPanel({
     }
   }
   const metrics = data?.metrics;
+  const pokerStrategy = metrics?.poker_strategy;
   return (
     <div className="watchtower">
       <div className="watchtower-heading">
@@ -206,6 +216,52 @@ export function HarnessPanel({
                 {metrics.native_usage.note} Context and public output below use character-based
                 token estimates.
               </p>
+              <div role="group" aria-label="Production Poker decisions">
+                <p>
+                  <strong>Production Poker decisions</strong>
+                </p>
+                {pokerStrategy && pokerStrategy.sample_count > 0 ? (
+                  <>
+                    <div className="watchtower-problems">
+                      <span>
+                        Measured decisions: <b>{pokerStrategy.sample_count}</b>
+                      </span>
+                      <span>
+                        Native without fallback: <b>{pokerStrategy.native_without_fallback}</b>
+                      </span>
+                      <span>
+                        Fallback decisions: <b>{pokerStrategy.fallback_decisions}</b>
+                      </span>
+                    </div>
+                    <p>
+                      Final selected actions:{' '}
+                      {Object.entries(pokerStrategy.actions)
+                        .map(([action, count]) => `${action.replaceAll('_', '-')}: ${count}`)
+                        .join(' · ') || 'Not recorded'}
+                      .
+                    </p>
+                    <p>
+                      {pokerStrategy.preflop_samples > 0 ? (
+                        <>
+                          Selected preflop all-ins: {pokerStrategy.preflop_all_ins} across{' '}
+                          {pokerStrategy.preflop_samples} preflop decisions. Raw model preflop
+                          all-in attempts: {pokerStrategy.raw_preflop_all_in_attempts}.
+                        </>
+                      ) : (
+                        'Preflop observations unavailable: no measured preflop decisions.'
+                      )}
+                    </p>
+                    <p>Validation rejections: {pokerStrategy.validation_rejections}.</p>
+                    <p className="subtle">{pokerStrategy.note}</p>
+                  </>
+                ) : (
+                  <p className="muted">Poker observations unavailable: no measured decisions.</p>
+                )}
+                <p className="subtle">
+                  Newly instrumented production decisions only. Synthetic strategy scenarios are
+                  reported separately in Active evaluations.
+                </p>
+              </div>
               <div className="watchtower-table">
                 <table>
                   <thead>
@@ -325,6 +381,19 @@ export function HarnessPanel({
           />{' '}
           Include native model probes (manual, up to 90 seconds; uses local inference)
         </label>
+        <label className="toggle-field">
+          <input
+            type="checkbox"
+            checked={pokerNative}
+            disabled={busy || running}
+            onChange={(event) => setPokerNative(event.target.checked)}
+          />{' '}
+          Include Poker strategy probes (manual, up to 90 seconds; uses local inference)
+        </label>
+        <p className="subtle">
+          Native chat and Poker strategy scopes each allow up to 90 seconds; selecting both allows
+          up to 180 seconds of local inference. Probes run only after you click Run evaluations.
+        </p>
         <div className="row-actions">
           <button
             className="button"
@@ -357,6 +426,10 @@ export function HarnessPanel({
                 · {formatDate(evaluation.created_at)}
               </small>
             </div>
+            {(evaluation.report.native_requested != null ||
+              evaluation.report.poker_native_requested != null) && (
+              <p className="subtle">Requested native scopes: {nativeScopes || 'none'}.</p>
+            )}
             <div className="watchtower-gates">
               {Object.entries(evaluation.report.counts ?? {}).map(([status, count]) => (
                 <span className={`gate-${status.toLowerCase()}`} key={status}>
@@ -390,10 +463,7 @@ export function HarnessPanel({
             {running && (
               <p role="status">
                 Running isolated gates
-                {evaluation.report.native_requested
-                  ? ', then explicitly requested native probes'
-                  : ''}
-                …
+                {nativeScopes ? `, then explicitly requested ${nativeScopes} probes` : ''}…
               </p>
             )}
             {evaluation.report.baseline_id && (

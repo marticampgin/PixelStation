@@ -189,8 +189,10 @@ def test_evaluation_api_is_persistent_isolated_and_native_is_explicit(tmp_path):
         assert started.status_code == 202
         result = wait_evaluation(client, started.json()["id"])
         assert result["status"] == "COMPLETE"
-        assert result["counts"] == {"PASS": 7, "SKIP": 2}
+        assert result["counts"] == {"PASS": 13, "SKIP": 8}
         assert result["native_requested"] is False
+        assert result["poker_native_requested"] is False
+        assert result["fixture"]["poker"]["version"] == "pixel-station-poker-strategy-v1"
         assert result["runner_version"] == RUNNER_VERSION
         with app.state.database.session() as session:
             legacy = {key: value for key, value in result.items() if key != "runner_version"}
@@ -269,7 +271,7 @@ def test_native_probe_is_manual_read_only_records_failure_and_freezes_configurat
         release.set()
         result = wait_evaluation(client, started_job["id"])
         assert result["outcome"] == "FAIL"
-        assert result["counts"] == {"PASS": 8, "FAIL": 1}
+        assert result["counts"] == {"PASS": 14, "FAIL": 1, "SKIP": 6}
         assert "Created fixture-first.csv" not in json.dumps(result)
         assert result["configuration"]["retrieval_count"] == 4
         assert client.put("/api/settings", json=settings.model_dump()).status_code == 200

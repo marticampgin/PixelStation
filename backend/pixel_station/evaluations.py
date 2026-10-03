@@ -20,7 +20,7 @@ from .poker import act, legal_actions, new_game, public_view
 from .providers.reasoning import ReasoningFilter
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "evaluations_v1.json"
-RUNNER_VERSION = 3
+RUNNER_VERSION = 4
 
 
 def fixtures() -> dict:
@@ -28,9 +28,21 @@ def fixtures() -> dict:
 
 
 def fixture_identity() -> dict:
+    from .poker_evaluations import poker_fixture_identity
+
+    poker_identity = {
+        **poker_fixture_identity(),
+        "decision_source_sha256": hashlib.sha256(
+            (Path(__file__).parent / "poker.py").read_bytes()
+        ).hexdigest(),
+        "context_source_sha256": hashlib.sha256(
+            (Path(__file__).parent / "poker_strategy.py").read_bytes()
+        ).hexdigest(),
+    }
     return {
         "version": fixtures()["version"],
         "sha256": hashlib.sha256(FIXTURE_PATH.read_bytes()).hexdigest(),
+        "poker": poker_identity,
     }
 
 
@@ -280,27 +292,10 @@ def synthesis_measurements(traces, observations, resets):
     }
 
 
-async def native_cases(app, settings=None) -> list[dict]:
-    from .chat import AnswerReset, answer_prose, answer_stream, unsupported_answer_protocol
+async def native_runtime_identity(app, settings) -> dict:
     from .providers import OllamaProvider
 
-    settings = settings or app.state.settings()
     model = settings.roles["primary_chat"]
-    fixture = fixtures()
-    results = []
-    if not model:
-        return [
-            {
-                "id": identifier,
-                "label": identifier.replace("_", " "),
-                "scope": "native_model",
-                "critical": True,
-                "status": "SKIP",
-                "reason": "No primary local model assigned",
-            }
-            for identifier in ("native_plan", "native_file_qa")
-        ]
-    native_deadline = time.monotonic() + 90
     runtime = {
         "ollama": "not_available",
         "model": model,
@@ -332,6 +327,30 @@ async def native_cases(app, settings=None) -> list[dict]:
                 )
         except (httpx.HTTPError, ValueError):
             pass
+    return runtime
+
+
+async def native_cases(app, settings=None) -> list[dict]:
+    from .chat import AnswerReset, answer_prose, answer_stream, unsupported_answer_protocol
+
+    settings = settings or app.state.settings()
+    model = settings.roles["primary_chat"]
+    fixture = fixtures()
+    results = []
+    if not model:
+        return [
+            {
+                "id": identifier,
+                "label": identifier.replace("_", " "),
+                "scope": "native_model",
+                "critical": True,
+                "status": "SKIP",
+                "reason": "No primary local model assigned",
+            }
+            for identifier in ("native_plan", "native_file_qa")
+        ]
+    native_deadline = time.monotonic() + 90
+    runtime = await native_runtime_identity(app, settings)
     for identifier in ("native_plan", "native_file_qa"):
         started = time.monotonic()
         observations: list[dict] = []

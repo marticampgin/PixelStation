@@ -33,6 +33,7 @@ export interface Evaluation {
     runner_version?: number;
     outcome?: string;
     native_requested?: boolean;
+    poker_native_requested?: boolean;
     fixture?: { version: string; sha256: string };
     counts?: Record<string, number>;
     cases?: EvaluationCase[];
@@ -77,6 +78,17 @@ export interface Watchtower {
       prompt_tokens: number;
       generated_tokens: number;
       tokens_per_second: Distribution;
+      note: string;
+    };
+    poker_strategy?: {
+      sample_count: number;
+      actions: Record<string, number>;
+      native_without_fallback: number;
+      fallback_decisions: number;
+      preflop_samples: number;
+      preflop_all_ins: number;
+      raw_preflop_all_in_attempts: number;
+      validation_rejections: number;
       note: string;
     };
     problem_counts: Record<string, number>;

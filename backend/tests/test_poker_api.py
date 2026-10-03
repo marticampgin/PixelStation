@@ -21,7 +21,10 @@ class PokerLLM:
         self.invalid = invalid
 
     async def models(self):
-        return {"available": True, "models": [{"name": "poker-test", "capabilities": ["completion"]}]}
+        return {
+            "available": True,
+            "models": [{"name": "poker-test", "capabilities": ["completion"]}],
+        }
 
     async def structured(self, model, messages, schema, **kwargs):
         assert model == "poker-test" and schema.__name__ == "BotChoice"
@@ -31,7 +34,9 @@ class PokerLLM:
         if self.invalid:
             return schema(action="raise", amount=1)
         options = {option["action"] for option in view["legal_actions"]}
-        return schema(action="check" if "check" in options else "call" if "call" in options else "fold")
+        return schema(
+            action="check" if "check" in options else "call" if "call" in options else "fold"
+        )
 
 
 def make_app(tmp_path, llm=None, model=True):
@@ -89,12 +94,25 @@ def test_illegal_human_api_action_does_not_change_persisted_hand(tmp_path):
     with TestClient(app) as client:
         before = client.post("/api/poker/sessions", json={"seats": 2}).json()
         id_ = before["id"]
-        assert client.post(f"/api/poker/sessions/{id_}/actions", json={"action": "check"}).status_code == 422
-        assert client.post(f"/api/poker/sessions/{id_}/actions", json={"action": "raise", "amount": 1}).status_code == 422
+        assert (
+            client.post(f"/api/poker/sessions/{id_}/actions", json={"action": "check"}).status_code
+            == 422
+        )
+        assert (
+            client.post(
+                f"/api/poker/sessions/{id_}/actions", json={"action": "raise", "amount": 1}
+            ).status_code
+            == 422
+        )
         assert client.post(f"/api/poker/sessions/{id_}/next-hand").status_code == 422
         assert client.get(f"/api/poker/sessions/{id_}").json() == before
         assert client.get("/api/poker/sessions/missing").status_code == 404
-        assert client.post("/api/poker/sessions", json={"seats": 2, "small_blind": 10, "big_blind": 5}).status_code == 422
+        assert (
+            client.post(
+                "/api/poker/sessions", json={"seats": 2, "small_blind": 10, "big_blind": 5}
+            ).status_code
+            == 422
+        )
 
 
 def test_missing_local_model_uses_disclosed_legal_fallback(tmp_path):
@@ -118,12 +136,24 @@ def test_invalid_bot_action_retries_once_and_records_friction(tmp_path):
         result = client.post(f"/api/poker/sessions/{table['id']}/actions", json={"action": "call"})
         assert result.status_code == 200, result.text
         assert result.json()["actor"] == 0 and "fallback" in result.json()["model_status"]
-        # One preflop AI action and one flop AI action, each retried exactly once.
-        assert len(llm.views) == 4
+        # Each actual AI move gets one repair; a price-aware fallback may raise
+        # preflop and return control before the flop rather than always calling.
+        bot_moves = [
+            item
+            for item in result.json()["history"]
+            if item["seat"] == 1 and item["action"] not in {"small_blind", "big_blind"}
+        ]
+        assert bot_moves and len(llm.views) == 2 * len(bot_moves)
         with app.state.database.session() as session:
-            events = list(session.scalars(select(FrictionEvent).where(FrictionEvent.kind == "invalid_poker_action")))
-            assert len(events) == 4
-        assert all(item["amount"] != 1 for item in result.json()["history"] if item["action"] == "raise")
+            events = list(
+                session.scalars(
+                    select(FrictionEvent).where(FrictionEvent.kind == "invalid_poker_action")
+                )
+            )
+            assert len(events) == len(llm.views)
+        assert all(
+            item["amount"] != 1 for item in result.json()["history"] if item["action"] == "raise"
+        )
 
 
 @pytest.mark.asyncio
@@ -151,12 +181,16 @@ async def test_async_bot_queue_wait_is_inside_bounded_budget(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_bot_action_budget_finishes_legal_hand_without_losing_human_all_in(tmp_path, monkeypatch):
+async def test_bot_action_budget_finishes_legal_hand_without_losing_human_all_in(
+    tmp_path, monkeypatch
+):
     class RaisingLLM(PokerLLM):
         async def structured(self, model, messages, schema, **kwargs):
             view = json.loads(messages[-1]["content"])
             self.views.append(view)
-            raise_option = next((choice for choice in view["legal_actions"] if choice["action"] == "raise"), None)
+            raise_option = next(
+                (choice for choice in view["legal_actions"] if choice["action"] == "raise"), None
+            )
             if raise_option:
                 return schema(action="raise", amount=raise_option["min"])
             legal = {choice["action"] for choice in view["legal_actions"]}
@@ -185,8 +219,15 @@ async def test_bot_action_budget_finishes_legal_hand_without_losing_human_all_in
 def test_short_opening_all_in_does_not_use_limit_poker_completion():
     # TDA/RRoP No-Limit ¶2: a short opening all-in needs a full BB increment to raise.
     state = new_game(3, rng=random.Random(2))
-    state.update(stage="flop", board=["2c", "3d", "4s"], actor=0, current_bet=0,
-                 last_raise=10, last_acted={}, pending=[0, 1, 2])
+    state.update(
+        stage="flop",
+        board=["2c", "3d", "4s"],
+        actor=0,
+        current_bet=0,
+        last_raise=10,
+        last_acted={},
+        pending=[0, 1, 2],
+    )
     for seat in state["seats"]:
         seat["bet"] = 0
     state["seats"][0]["stack"] = 6
@@ -198,7 +239,9 @@ def test_short_opening_all_in_does_not_use_limit_poker_completion():
 def test_split_pot_odd_chip_goes_left_of_button_and_excess_is_returned():
     state = new_game(3, rng=random.Random(3))
     state.update(board="As Ks Qs Js Ts".split(), dealer=0, initial_chips=35)
-    for seat, hole, contribution, folded in zip(state["seats"], ["2d 3d", "4d 5d", "6d 7d"], [10, 20, 5], [False, False, True], strict=True):
+    for seat, hole, contribution, folded in zip(
+        state["seats"], ["2d 3d", "4d 5d", "6d 7d"], [10, 20, 5], [False, False, True], strict=True
+    ):
         seat.update(hole=hole.split(), contribution=contribution, stack=0, folded=folded)
     finish(state)
     # 15-chip main pot ties: seat 1 gets odd chip. 10-chip side pot ties. 10 excess to seat 1.

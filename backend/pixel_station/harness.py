@@ -179,6 +179,7 @@ def record_observation(
 
 class EvaluationRequest(BaseModel):
     native: bool = False
+    poker_native: bool = False
 
 
 def baseline_compatible(previous: dict, current: dict) -> bool:
@@ -192,12 +193,13 @@ def baseline_compatible(previous: dict, current: dict) -> bool:
             "fixture",
             "runner_version",
             "native_requested",
+            "poker_native_requested",
             "configuration",
             "versions",
         )
     ):
         return False
-    if current.get("native_requested"):
+    if current.get("native_requested") or current.get("poker_native_requested"):
         return (
             known_native_identity(current.get("native_runtime"))
             and known_native_identity(previous.get("native_runtime"))
@@ -214,11 +216,19 @@ def recover_evaluations(app) -> None:
         session.commit()
 
 
-async def execute_evaluation(app, identity: str, native: bool, settings) -> None:
+async def execute_evaluation(
+    app, identity: str, native: bool, settings, poker_native=False
+) -> None:
     from .evaluations import deterministic_cases, native_cases
+    from .poker_evaluations import (
+        deterministic_poker_cases,
+        native_poker_cases,
+        skipped_poker_cases,
+    )
 
     try:
         cases = await asyncio.to_thread(deterministic_cases)
+        cases += await asyncio.to_thread(deterministic_poker_cases)
         with app.state.database.session() as session:
             row = session.get(HarnessReport, identity)
             row.report = {**row.report, "cases": cases}
@@ -240,10 +250,13 @@ async def execute_evaluation(app, identity: str, native: bool, settings) -> None
                     ("native_file_qa", "Native supplied-file answer"),
                 )
             ]
+        cases += await native_poker_cases(app, settings) if poker_native else skipped_poker_cases()
         with app.state.database.session() as session:
             row = session.get(HarnessReport, identity)
             runtimes = [
-                case.get("runtime") for case in cases if case.get("scope") == "native_model"
+                case.get("runtime")
+                for case in cases
+                if case.get("scope") == "native_model" and case.get("status") != "SKIP"
             ]
             native_runtime = (
                 runtimes[0] if runtimes and all(item == runtimes[0] for item in runtimes) else None
@@ -323,7 +336,9 @@ async def start_evaluation(
     app = request.app
     if getattr(app.state, "evaluation_task", None) and not app.state.evaluation_task.done():
         raise HTTPException(409, "An evaluation is already running")
-    if body.native and (app.state.active_generations or app.state.model_queue.lock.locked()):
+    if (body.native or body.poker_native) and (
+        app.state.active_generations or app.state.model_queue.lock.locked()
+    ):
         raise HTTPException(
             409, "Local inference is busy. Run the native probe after current work finishes."
         )
@@ -335,6 +350,7 @@ async def start_evaluation(
             "fixture": fixture_identity(),
             "runner_version": RUNNER_VERSION,
             "native_requested": body.native,
+            "poker_native_requested": body.poker_native,
             "configuration": safe_configuration(settings),
             "versions": runtime_versions(),
             "cases": [],
@@ -343,8 +359,10 @@ async def start_evaluation(
     )
     session.add(row)
     session.commit()
-    app.state.native_evaluation = body.native
-    task = asyncio.create_task(execute_evaluation(app, row.id, body.native, settings))
+    app.state.native_evaluation = body.native or body.poker_native
+    task = asyncio.create_task(
+        execute_evaluation(app, row.id, body.native, settings, body.poker_native)
+    )
     app.state.evaluation_task = task
     app.state.background_tasks.add(task)
     task.add_done_callback(app.state.background_tasks.discard)
