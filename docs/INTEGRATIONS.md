@@ -58,6 +58,8 @@ Generation submits to `/prompt`, follows websocket progress when available, and 
 
 Each job retains the endpoint chosen when it was submitted. Changing Settings affects later jobs; existing queued/running jobs continue polling, downloading and cancelling at their original ComfyUI endpoint.
 
+Polling/download failures attempt cleanup of that job's remote prompt. If ComfyUI cannot confirm cleanup, the persisted job explicitly says it may still be running and retains a Cancel control so cleanup can be retried when the service returns. Failed/interrupted jobs with a submitted prompt are never silently described as stopped.
+
 An invalid workflow generally indicates a missing checkpoint/custom node or a canvas export. A workflow with no saved output returns an error. Out-of-memory failures require reducing dimensions, using an appropriate model, or freeing GPU memory. Generations have a ten-minute deadline; image downloads have a 40 MB cap.
 
 ## Gmail and Google Calendar
@@ -85,6 +87,8 @@ Requested scopes:
 Full `https://mail.google.com/` access is not requested. The draft provider creates MIME messages and verifies the returned Gmail draft ID by reopening it. Email bodies are used as task evidence, not automatically saved as general memory. [Gmail drafts API](https://developers.google.com/workspace/gmail/api/reference/rest/v1/users.drafts/create).
 
 Email send and calendar create/update/delete return a pending proposal. The frontend shows the exact payload for review. Confirmation atomically consumes that proposal once, with a ten-minute expiry. Retries need a new proposal, preventing a second click or network retry from silently repeating an external action. Calendar update/delete proposals capture the existing event and its ETag; Google receives `If-Match`, so an intervening edit requires fresh review. Event times must carry explicit timezone offsets. The initial event editor supports title, description, location, start and end; invitations/recurrence are outside that editor's current scope. [Calendar event reference](https://developers.google.com/workspace/calendar/api/v3/reference/events).
+
+If Google accepts a Calendar create/update or Gmail draft but the follow-up verification fails, the error retains the operation and returned ID. It asks you to inspect Calendar or Gmail Drafts before proposing the operation again; the confirmation remains consumed. The API exposes `accepted`, `operation` and `returned_id` alongside the actionable message, and Calendar confirmation outcomes preserve those fields locally. A send response without a message ID similarly asks you to inspect Gmail Sent before another send.
 
 An External OAuth app left in **Testing** receives refresh tokens that expire after seven days for Gmail/Calendar scopes. Move a long-lived personal app to **In production** when appropriate for your account and Google's policies. Google can still revoke credentials, and changing a Google password can invalidate Gmail refresh tokens. Pixel Station then asks you to reconnect. [Google refresh-token rules](https://developers.google.com/identity/protocols/oauth2#expiration).
 

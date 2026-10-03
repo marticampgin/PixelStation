@@ -71,6 +71,6 @@ class SqliteVectorStore:
             matches = [
                 (row.id, cosine(vector, row.embedding))
                 for row in fallback_rows
-                if len(row.embedding) == len(vector)
+                if isinstance(row.embedding, list) and len(row.embedding) == len(vector)
             ]
             return sorted(matches, key=lambda pair: pair[1], reverse=True)[:limit]

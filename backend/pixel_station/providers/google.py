@@ -273,18 +273,35 @@ class GoogleConnector:
     async def create_draft(self, **email: Any) -> dict[str, Any]:
         result = await self.request("POST", GMAIL + "/drafts", body={"message": self.email_payload(**email)})
         if not result.get("id"):
-            raise IntegrationError("Gmail did not return a draft ID.", "draft_validation_failed")
+            raise self._accepted_unverified("gmail_draft", None)
         # Reopen the actual artifact to validate creation.
-        verified = await self.request("GET", GMAIL + "/drafts/" + quote(result["id"], safe=""), params={"format": "minimal"})
+        try:
+            verified = await self.request("GET", GMAIL + "/drafts/" + quote(result["id"], safe=""), params={"format": "minimal"})
+        except IntegrationError as exc:
+            raise self._accepted_unverified("gmail_draft", result["id"], exc) from exc
         if verified.get("id") != result["id"]:
-            raise IntegrationError("Gmail draft could not be verified.", "draft_validation_failed")
+            raise self._accepted_unverified("gmail_draft", result["id"])
         return result
 
     async def send_email(self, **email: Any) -> dict[str, Any]:
         result = await self.request("POST", GMAIL + "/messages/send", body=self.email_payload(**email))
         if not result.get("id"):
-            raise IntegrationError("Gmail did not return a sent-message ID.", "send_validation_failed")
+            raise self._accepted_unverified("gmail_send", None)
         return result
+
+    @staticmethod
+    def _accepted_unverified(operation: str, returned_id: str | None,
+                             cause: IntegrationError | None = None) -> IntegrationError:
+        labels = {"gmail_draft": ("Gmail draft creation", "Gmail Drafts"),
+                  "gmail_send": ("email send", "Gmail Sent"),
+                  "calendar_create": ("Calendar event creation", "Google Calendar"),
+                  "calendar_update": ("Calendar event update", "Google Calendar")}
+        action, workspace = labels[operation]
+        identity = f" (ID: {returned_id})" if returned_id else " without returning an ID"
+        reason = f" Verification failed: {str(cause)}" if cause else " Verification could not confirm the returned artifact."
+        return IntegrationError(f"Google accepted {action}{identity}.{reason} Inspect {workspace} before proposing the action again to avoid duplicates.",
+                                "accepted_unverified", 503,
+                                {"accepted": True, "operation": operation, "returned_id": returned_id})
 
     async def calendars(self) -> dict[str, Any]:
         return await self.request("GET", CALENDAR + "/users/me/calendarList", params={"maxResults": 100})
@@ -340,8 +357,11 @@ class GoogleConnector:
         result = await self.request(method, url, body=self.validate_event(event) if event else None, etag=etag)
         if action != "calendar_delete":
             if not result.get("id"):
-                raise IntegrationError("Google did not return an event ID.", "event_validation_failed")
-            verified = await self.event(calendar_id, result["id"])
+                raise self._accepted_unverified(action, None)
+            try:
+                verified = await self.event(calendar_id, result["id"])
+            except IntegrationError as exc:
+                raise self._accepted_unverified(action, result["id"], exc) from exc
             if verified.get("id") != result["id"]:
-                raise IntegrationError("Created event could not be verified.", "event_validation_failed")
+                raise self._accepted_unverified(action, result["id"])
         return result

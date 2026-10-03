@@ -108,6 +108,9 @@ class PersistentScheduler:
         from .indexing import index_pending
 
         await index_pending(self.app)
+        from .memory import compact_due
+
+        await compact_due(self.app)
         settings = self.app.state.settings()
         if not settings.harness_enabled or self.app.state.active_generations:
             return

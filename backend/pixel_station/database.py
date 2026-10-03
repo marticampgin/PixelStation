@@ -77,7 +77,7 @@ class Memory(Base):
     confidence: Mapped[float] = mapped_column(default=1.0)
     pinned: Mapped[bool] = mapped_column(default=False)
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
-    embedding: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     start_date: Mapped[str | None] = mapped_column(nullable=True)
     end_date: Mapped[str | None] = mapped_column(nullable=True)
     expiry: Mapped[str | None] = mapped_column(nullable=True)
@@ -131,7 +131,7 @@ class DocumentChunk(Base):
     location: Mapped[str] = mapped_column(default="")
     page: Mapped[int | None] = mapped_column(nullable=True)
     heading: Mapped[str] = mapped_column(default="")
-    embedding: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(JSON(none_as_null=True), nullable=True)
 
 
 class Setting(Base):

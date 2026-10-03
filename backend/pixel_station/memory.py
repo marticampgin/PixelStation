@@ -1,6 +1,6 @@
 import asyncio
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -15,6 +15,7 @@ from .database import (
     MemoryLink,
     MemoryRevision,
     Message,
+    ScheduledJob,
     get_session,
     now,
     record_dict,
@@ -269,8 +270,17 @@ class ExtractionOutput(BaseModel):
 
 
 async def compact_conversation(app, conversation_id: str) -> None:
+    lock = app.state.compaction_locks.setdefault(conversation_id, asyncio.Lock())
+    async with lock:
+        await _compact_locked(app, conversation_id)
+
+
+async def _compact_locked(app, conversation_id: str) -> None:
     settings = app.state.settings()
     with app.state.database.session() as session:
+        job = session.get(ScheduledJob, f"summary:{conversation_id}")
+        if job and job.next_run > now():
+            return
         conversation = session.get(Conversation, conversation_id)
         if not conversation:
             return
@@ -286,10 +296,19 @@ async def compact_conversation(app, conversation_id: str) -> None:
         model = settings.roles["summarizer"] or settings.roles["primary_chat"]
         if not model:
             return
-        count = len(rows)
+        batch = rows[
+            conversation.summary_message_count : conversation.summary_message_count
+            + settings.summary_turns * 2
+        ]
+        count = conversation.summary_message_count + len(batch)
+        per_message_chars = min(2000, settings.context_tokens * 2 // max(1, len(batch)))
         transcript = "\n".join(
-            f"[{row.id}] {row.role}: {row.content[:3000]}"
-            for row in rows[-settings.summary_turns * 2 :]
+            f"[{row.id}] {row.role}: {row.content[:per_message_chars]}" for row in batch
+        )
+        extraction_transcript = "\n".join(
+            f"[{row.id}] user: {row.content[:per_message_chars]}"
+            for row in batch
+            if row.role == "user"
         )
         old_summary = conversation.summary
     try:
@@ -318,7 +337,7 @@ async def compact_conversation(app, conversation_id: str) -> None:
                             "role": "system",
                             "content": "Extract only explicitly stated stable user preferences, facts, projects, or events. No guesses, no assistant claims, no private email content. Skip trivial exchanges. Set should_store=false when uncertain. Set source_message_id to the actual user message ID in brackets that supports this memory, or null if unclear. Leave source_conversation_id null; the application assigns it.",
                         },
-                        {"role": "user", "content": transcript},
+                        {"role": "user", "content": extraction_transcript},
                     ],
                     ExtractionOutput,
                 )
@@ -327,12 +346,18 @@ async def compact_conversation(app, conversation_id: str) -> None:
             if not conversation:
                 return
             conversation.summary, conversation.summary_message_count = summary.summary, count
+            job = session.get(ScheduledJob, f"summary:{conversation_id}")
+            if not job:
+                job = ScheduledJob(id=f"summary:{conversation_id}", next_run=now())
+                session.add(job)
+            job.last_run = now()
+            job.next_run = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
             session.commit()
             if extraction:
                 for candidate in extraction.candidates:
                     if candidate.should_store and candidate.confidence >= 0.75:
                         data = candidate.model_dump(exclude={"should_store"})
-                        user_ids = {row.id for row in rows if row.role == "user"}
+                        user_ids = {row.id for row in batch if row.role == "user"}
                         data["source_conversation_id"] = conversation_id
                         if data.get("source_message_id") not in user_ids:
                             data["source_message_id"] = None
@@ -340,4 +365,40 @@ async def compact_conversation(app, conversation_id: str) -> None:
     except Exception as exc:
         with app.state.database.session() as session:
             session.add(FrictionEvent(kind="memory_compaction_error", details=str(exc)[:1000]))
+            job = session.get(ScheduledJob, f"summary:{conversation_id}")
+            if not job:
+                job = ScheduledJob(id=f"summary:{conversation_id}", next_run=now())
+                session.add(job)
+            job.next_run = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
             session.commit()
+
+
+async def compact_due(app) -> None:
+    if app.state.active_generations or app.state.model_queue.lock.locked():
+        return
+    from sqlalchemy import func
+
+    settings = app.state.settings()
+    if not (settings.roles["summarizer"] or settings.roles["primary_chat"]):
+        return
+    candidate = None
+    with app.state.database.session() as session:
+        for conversation in session.scalars(
+            select(Conversation).order_by(Conversation.updated_at.desc())
+        ):
+            job = session.get(ScheduledJob, f"summary:{conversation.id}")
+            if job and job.next_run > now():
+                continue
+            count = (
+                session.scalar(
+                    select(func.count(Message.id)).where(
+                        Message.conversation_id == conversation.id, Message.status == "complete"
+                    )
+                )
+                or 0
+            )
+            if count - conversation.summary_message_count >= settings.summary_turns * 2:
+                candidate = conversation.id
+                break
+    if candidate:
+        await compact_conversation(app, candidate)

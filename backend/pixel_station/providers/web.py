@@ -16,9 +16,11 @@ import httpx
 
 
 class IntegrationError(Exception):
-    def __init__(self, message: str, code: str = "integration_error", status: int = 503):
+    def __init__(self, message: str, code: str = "integration_error", status: int = 503,
+                 details: dict[str, Any] | None = None):
         super().__init__(message)
         self.code, self.status = code, status
+        self.details = details or {}
 
 
 def endpoint_url(value: str) -> str:

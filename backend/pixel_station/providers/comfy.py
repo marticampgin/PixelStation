@@ -39,10 +39,15 @@ class ComfyImageProvider:
         with self.db() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS workflows(id TEXT PRIMARY KEY,name TEXT NOT NULL,workflow TEXT NOT NULL,bindings TEXT NOT NULL,created_at TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,payload TEXT NOT NULL,status TEXT NOT NULL,progress REAL NOT NULL DEFAULT 0,prompt_id TEXT,error TEXT,created_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY,payload TEXT NOT NULL,status TEXT NOT NULL,progress REAL NOT NULL DEFAULT 0,prompt_id TEXT,error TEXT,created_at TEXT NOT NULL,remote_cleanup_required INTEGER NOT NULL DEFAULT 0);
                 CREATE TABLE IF NOT EXISTS images(id TEXT PRIMARY KEY,job_id TEXT NOT NULL,path TEXT NOT NULL,prompt TEXT NOT NULL,seed INTEGER NOT NULL,width INTEGER NOT NULL,height INTEGER NOT NULL,workflow_id TEXT NOT NULL,created_at TEXT NOT NULL);
-                UPDATE jobs SET status='interrupted',error='Generation interrupted by application restart. Regenerate to try again.' WHERE status IN ('queued','running');
             """)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(jobs)")}
+            if "remote_cleanup_required" not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN remote_cleanup_required INTEGER NOT NULL DEFAULT 0")
+                db.execute("UPDATE jobs SET remote_cleanup_required=1 WHERE prompt_id IS NOT NULL AND status IN ('queued','running','failed','interrupted','cancelled')")
+            db.execute("UPDATE jobs SET remote_cleanup_required=1 WHERE prompt_id IS NOT NULL AND status IN ('queued','running')")
+            db.execute("UPDATE jobs SET status='interrupted',error='Generation interrupted by application restart. Regenerate to try again.' WHERE status IN ('queued','running')")
 
     def db(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.db_path)
@@ -137,7 +142,7 @@ class ComfyImageProvider:
         return result
 
     def _update(self, id_: str, **kwargs: Any) -> None:
-        allowed = {"status", "progress", "prompt_id", "error"}
+        allowed = {"status", "progress", "prompt_id", "error", "remote_cleanup_required"}
         if not kwargs or not set(kwargs) <= allowed:
             return
         with self.db() as db:
@@ -167,6 +172,8 @@ class ComfyImageProvider:
 
     async def _run(self, id_: str, payload: dict[str, Any]) -> None:
         progress_task = None
+        prompt_id = None
+        base = endpoint_url(payload.get("endpoint") or self.endpoint())
         try:
             async with self.lock:
                 workflow, bindings = self._workflow(payload["workflow_id"])
@@ -174,17 +181,16 @@ class ComfyImageProvider:
                 for key, binding in bindings.items():
                     workflow[str(binding["node"])]["inputs"][binding["input"]] = payload[key]
                 client_id = str(uuid.uuid4())
-                base = endpoint_url(payload.get("endpoint") or self.endpoint())
                 if self.transport is None:
                     progress_task = asyncio.create_task(self._progress(id_, client_id, base))
                 async with httpx.AsyncClient(timeout=30, transport=self.transport, trust_env=False) as client:
                     response = await client.post(base + "/prompt", json={"prompt": workflow, "client_id": client_id})
                     response.raise_for_status()
                     submitted = response.json()
-                    prompt_id = submitted.get("prompt_id")
-                    if not prompt_id or submitted.get("node_errors"):
+                    prompt_id = submitted.get("prompt_id") if isinstance(submitted, dict) else None
+                    if not isinstance(prompt_id, str) or not prompt_id or submitted.get("node_errors"):
                         raise IntegrationError("ComfyUI rejected this workflow. Verify its nodes and installed models.", "workflow_rejected")
-                    self._update(id_, status="running", prompt_id=prompt_id)
+                    self._update(id_, status="running", prompt_id=prompt_id, remote_cleanup_required=True)
                     deadline = time.monotonic() + self.timeout
                     while time.monotonic() < deadline:
                         response = await client.get(base + "/history/" + prompt_id)
@@ -195,6 +201,7 @@ class ComfyImageProvider:
                             if status.get("status_str") == "error":
                                 raise IntegrationError("ComfyUI execution failed. Check its console and workflow models.", "execution_failed")
                             if status.get("completed", False) or history.get("outputs"):
+                                self._update(id_, remote_cleanup_required=False)
                                 saved = 0
                                 for output in history.get("outputs", {}).values():
                                     for image in output.get("images", [])[:8]:
@@ -206,16 +213,23 @@ class ComfyImageProvider:
                                         break
                                 if not saved:
                                     raise IntegrationError("This workflow produced no saved image. Add a SaveImage output node.", "no_images")
-                                self._update(id_, status="complete", progress=1)
+                                self._update(id_, status="complete", progress=1, remote_cleanup_required=False)
                                 return
                         await asyncio.sleep(1)
-                    await self._cancel_remote(client, base, prompt_id)
-                    raise IntegrationError("Image generation exceeded 10 minutes and was cancelled.", "generation_timeout")
+                    raise IntegrationError("Image generation exceeded 10 minutes.", "generation_timeout")
         except asyncio.CancelledError:
             self._update(id_, status="cancelled", error="Cancelled by user.")
             raise
         except (httpx.HTTPError, IntegrationError, ValueError, OSError, TimeoutError) as exc:
-            self._update(id_, status="failed", error=str(exc) if isinstance(exc, IntegrationError) else "ComfyUI request failed. Check the local endpoint and console.")
+            message = str(exc) if isinstance(exc, IntegrationError) else "ComfyUI request failed. Check the local endpoint and console."
+            self._update(id_, status="failed", error=message)
+            if prompt_id:
+                try:
+                    async with httpx.AsyncClient(timeout=10, transport=self.transport, trust_env=False) as cleanup_client:
+                        await asyncio.wait_for(self._cancel_remote(cleanup_client, base, prompt_id), timeout=15)
+                    self._update(id_, remote_cleanup_required=False, error=message + " Remote prompt was removed or is no longer executing.")
+                except (httpx.HTTPError, IntegrationError, ValueError, TimeoutError):
+                    self._update(id_, remote_cleanup_required=True, error=message + " Remote cancellation could not be confirmed. ComfyUI may still be running this prompt; use Cancel again when its endpoint returns.")
         finally:
             if progress_task:
                 progress_task.cancel()
@@ -259,14 +273,18 @@ class ComfyImageProvider:
             row = db.execute("SELECT * FROM jobs WHERE id=?", (id_,)).fetchone()
         if not row:
             raise IntegrationError("Generation not found.", "not_found", 404)
-        return {**{k: v for k, v in dict(row).items() if k != "payload"}, **json.loads(row["payload"]), "images": self.library(id_)}
+        return {**{k: v for k, v in dict(row).items() if k != "payload"}, **json.loads(row["payload"]),
+                "remote_cleanup_required": bool(row["remote_cleanup_required"]), "images": self.library(id_)}
 
     async def _cancel_remote(self, client: httpx.AsyncClient, base: str, prompt_id: str) -> None:
         response = await client.post(base + "/queue", json={"delete": [prompt_id]})
         response.raise_for_status()
         response = await client.get(base + "/queue")
         response.raise_for_status()
-        if any(item[1] == prompt_id for item in response.json().get("queue_running", []) if len(item) > 1):
+        queue = response.json()
+        if not isinstance(queue, dict) or not isinstance(queue.get("queue_running"), list):
+            raise IntegrationError("ComfyUI returned an invalid queue; remote cancellation could not be confirmed.", "invalid_queue")
+        if any(item[1] == prompt_id for item in queue["queue_running"] if isinstance(item, list) and len(item) > 1):
             response = await client.post(base + "/interrupt")
             response.raise_for_status()
 
@@ -276,13 +294,14 @@ class ComfyImageProvider:
         if task:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        if job.get("prompt_id") and job["status"] in {"queued", "running"}:
+        if job.get("prompt_id") and (job["status"] in {"queued", "running"} or job.get("remote_cleanup_required")):
             try:
                 async with httpx.AsyncClient(timeout=10, transport=self.transport, trust_env=False) as client:
-                    await self._cancel_remote(client, endpoint_url(job.get("endpoint") or self.endpoint()), job["prompt_id"])
-            except httpx.HTTPError as exc:
-                self._update(id_, status="cancelled", error="Cancelled locally; ComfyUI was unreachable. Check its queue.")
-                raise IntegrationError("Cancelled locally; ComfyUI was unreachable. Check its queue.", "cancel_failed") from exc
+                    await asyncio.wait_for(self._cancel_remote(client, endpoint_url(job.get("endpoint") or self.endpoint()), job["prompt_id"]), timeout=15)
+                self._update(id_, status="cancelled", remote_cleanup_required=False, error="Cancellation requested; submitted prompt was removed or is no longer executing.")
+            except (httpx.HTTPError, IntegrationError, ValueError, TimeoutError) as exc:
+                self._update(id_, status="cancelled", remote_cleanup_required=True, error="Stopped local polling; remote cancellation could not be confirmed. ComfyUI may still be running this prompt. Use Cancel again when its endpoint returns.")
+                raise IntegrationError("Stopped local polling; remote cancellation could not be confirmed. ComfyUI may still be running this prompt. Use Cancel again when its endpoint returns.", "cancel_failed") from exc
         return self.job(id_)
 
     def image_path(self, id_: str) -> Path:

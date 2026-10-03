@@ -29,6 +29,19 @@ def create_app(data_dir: Path | None = None, llm=None, discover: bool = True) ->
     def set_settings(settings: AppSettings) -> None:
         with database.session() as session:
             row = session.get(Setting, "application")
+            if row and any(
+                row.value.get("roles", {}).get(role, "") != settings.roles[role]
+                for role in ("primary_chat", "summarizer", "memory_extractor")
+            ):
+                from sqlalchemy import update
+
+                from .database import ScheduledJob, now
+
+                session.execute(
+                    update(ScheduledJob)
+                    .where(ScheduledJob.id.like("summary:%"))
+                    .values(next_run=now())
+                )
             if (
                 row
                 and row.value.get("roles", {}).get("embedding", "") != settings.roles["embedding"]
@@ -145,6 +158,7 @@ def create_app(data_dir: Path | None = None, llm=None, discover: bool = True) ->
     app.state.active_generations = {}
     app.state.generation_tasks = {}
     app.state.background_tasks = set()
+    app.state.compaction_locks = {}
     # Migrate before optional providers read settings; repeated Alembic upgrades are idempotent.
     database.migrate()
     app.state.integration_services = IntegrationServices(

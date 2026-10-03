@@ -522,11 +522,14 @@ async def generate_response(
                             research_task, *([waiter] if waiter else []), return_exceptions=True
                         )
                 elif route.intent in {
+                    "gmail_search",
+                    "gmail_read",
                     "gmail_send",
                     "gmail_draft",
                     "calendar_create",
                     "calendar_update",
                     "calendar_delete",
+                    "calendar_read",
                 }:
                     tool_result = await google_chat_action(app, route.intent, payload.content)
                 else:

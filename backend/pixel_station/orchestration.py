@@ -54,6 +54,12 @@ def route_prompt(content: str, attachments: list[str] | None = None) -> Route:
         ),
         (r"\bsend\b.{0,30}\b(email|mail)\b", "gmail_send", ["gmail_send"], True),
         (r"\b(draft|reply)\b.{0,35}\b(email|mail)\b", "gmail_draft", ["gmail_draft"], False),
+        (
+            r"\b(read|open|summarize)\b.{0,35}\b(email|mail|gmail)\b",
+            "gmail_read",
+            ["gmail_search", "gmail_read"],
+            False,
+        ),
         (r"\b(email|gmail|inbox|mail)\b", "gmail_search", ["gmail_search"], False),
         (
             r"\b(delete|cancel)\b.{0,30}\b(event|appointment|meeting)\b",

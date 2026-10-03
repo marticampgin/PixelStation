@@ -126,7 +126,7 @@ def test_database_migration_wal_foreign_keys(tmp_path):
         assert connection.execute(text("PRAGMA journal_mode")).scalar() == "wal"
         assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
         assert (
-            connection.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0002"
+            connection.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0003"
         )
         assert connection.execute(
             text("SELECT name FROM sqlite_master WHERE name='memories_fts'")
@@ -293,7 +293,7 @@ async def test_disconnected_generator_persists_partial_response(app):
         ("show my calendar", "calendar_read"),
         ("cancel an appointment", "calendar_delete"),
         ("move the meeting", "calendar_update"),
-        ("read my email", "gmail_search"),
+        ("read my email", "gmail_read"),
         ("draft an email", "gmail_draft"),
         ("send an email", "gmail_send"),
         ("remember I like tea", "memory_write"),
@@ -822,6 +822,140 @@ async def test_indexer_never_applies_old_text_vector_after_memory_edit(app):
     with app.state.database.session() as session:
         assert session.get(Memory, identity).text == "New preference"
         assert session.get(Memory, identity).embedding is None
+
+
+def test_edit_memory_uses_sql_null_and_is_reindexed(client, app):
+    from pixel_station.database import Memory, ScheduledJob
+    from pixel_station.indexing import index_pending
+
+    memory = client.post("/api/memory", json={"text": "Old preference"}).json()
+    settings = client.get("/api/settings").json()
+    settings["roles"]["embedding"] = "local-test:latest"
+    client.put("/api/settings", json=settings)
+    with app.state.database.session() as session:
+        session.get(Memory, memory["id"]).embedding = [1.0, 0.0]
+        session.commit()
+    assert (
+        client.patch(
+            f"/api/memory/{memory['id']}", json={"text": "New quiet preference"}
+        ).status_code
+        == 200
+    )
+    with app.state.database.session() as session:
+        assert (
+            session.execute(
+                text("SELECT embedding IS NULL FROM memories WHERE id=:id"), {"id": memory["id"]}
+            ).scalar()
+            == 1
+        )
+        job = session.get(ScheduledJob, "vectors")
+        if job:
+            job.next_run = "2000-01-01"
+            session.commit()
+    asyncio.run(index_pending(app))
+    with app.state.database.session() as session:
+        assert session.get(Memory, memory["id"]).embedding == [1.0, 0.0]
+
+
+def test_embedding_json_null_data_migration(tmp_path):
+    from pixel_station.files import ingest
+
+    database = Database(tmp_path)
+    database.migrate()
+    with database.session() as session:
+        create_memory(session, MemoryInput(text="A preference"))
+        ingest(session, tmp_path, "notes.md", b"Notes")
+        session.execute(text("UPDATE memories SET embedding='null'"))
+        session.execute(text("UPDATE document_chunks SET embedding='null'"))
+        session.execute(text("UPDATE alembic_version SET version_num='0002'"))
+        session.commit()
+    database.migrate()
+    with database.session() as session:
+        assert session.execute(text("SELECT embedding IS NULL FROM memories")).scalar() == 1
+        assert session.execute(text("SELECT embedding IS NULL FROM document_chunks")).scalar() == 1
+
+
+async def test_compaction_covers_unprocessed_batch_and_excludes_assistant_email_data(app):
+    from pixel_station.database import Conversation
+    from pixel_station.memory import compact_conversation
+
+    settings = app.state.settings()
+    settings.roles["primary_chat"] = "local-test:latest"
+    settings.summary_turns = 2
+    app.state.set_settings(settings)
+    with app.state.database.session() as session:
+        conversation = Conversation()
+        session.add(conversation)
+        session.flush()
+        cid = conversation.id
+        for index in range(4):
+            session.add(Message(conversation_id=cid, role="user", content=f"User detail {index}"))
+            session.add(
+                Message(conversation_id=cid, role="assistant", content="PRIVATE CLIENT EMAIL BODY")
+            )
+        session.commit()
+    captured = {}
+
+    async def structured(model, messages, schema, **kwargs):
+        captured[schema.__name__] = messages[-1]["content"]
+        return (
+            schema(summary="First two turns covered")
+            if schema.__name__ == "SummaryOutput"
+            else schema(candidates=[])
+        )
+
+    app.state.llm.structured = structured
+    await compact_conversation(app, cid)
+    with app.state.database.session() as session:
+        assert session.get(Conversation, cid).summary_message_count == 4
+    assert "User detail 0" in captured["SummaryOutput"]
+    assert "User detail 3" not in captured["SummaryOutput"]
+    assert "PRIVATE CLIENT EMAIL BODY" not in captured["ExtractionOutput"]
+
+
+async def test_compaction_serializes_per_conversation_and_rechecks_state(app):
+    from pixel_station.database import Conversation
+    from pixel_station.memory import compact_conversation
+
+    settings = app.state.settings()
+    settings.roles["primary_chat"] = "local-test:latest"
+    settings.summary_turns = 2
+    app.state.set_settings(settings)
+    with app.state.database.session() as session:
+        conversation = Conversation()
+        session.add(conversation)
+        session.flush()
+        cid = conversation.id
+        for index in range(2):
+            session.add(Message(conversation_id=cid, role="user", content=f"Original {index}"))
+            session.add(Message(conversation_id=cid, role="assistant", content="Answer"))
+        session.commit()
+    started, release = asyncio.Event(), asyncio.Event()
+    summaries = 0
+
+    async def structured(model, messages, schema, **kwargs):
+        nonlocal summaries
+        if schema.__name__ == "SummaryOutput":
+            summaries += 1
+            started.set()
+            await release.wait()
+            return schema(summary="Original context retained")
+        return schema(candidates=[])
+
+    app.state.llm.structured = structured
+    first = asyncio.create_task(compact_conversation(app, cid))
+    await started.wait()
+    with app.state.database.session() as session:
+        session.add(Message(conversation_id=cid, role="user", content="Newest question"))
+        session.add(Message(conversation_id=cid, role="assistant", content="Newest answer"))
+        session.commit()
+    second = asyncio.create_task(compact_conversation(app, cid))
+    release.set()
+    await asyncio.gather(first, second)
+    assert summaries == 1
+    with app.state.database.session() as session:
+        assert session.get(Conversation, cid).summary_message_count == 4
+        assert session.get(Conversation, cid).summary == "Original context retained"
 
 
 def test_restart_preserves_chat_memory_and_settings(tmp_path):

@@ -30,7 +30,7 @@ class IntegrationRoute(APIRoute):
             try:
                 return await original(request)
             except IntegrationError as exc:
-                raise HTTPException(status_code=exc.status, detail={"message": str(exc), "code": exc.code}) from exc
+                raise HTTPException(status_code=exc.status, detail={"message": str(exc), "code": exc.code, **exc.details}) from exc
         return handler
 
 
@@ -182,7 +182,7 @@ class IntegrationServices:
             self.approvals.result(id_, result)
             return {"result": result}
         except IntegrationError as exc:
-            self.approvals.result(id_, {"error": str(exc)}, success=False)
+            self.approvals.result(id_, {"error": str(exc), "code": exc.code, **exc.details}, success=False)
             raise
 
     async def chat_context(self, route: str, prompt: str) -> dict[str, Any]:

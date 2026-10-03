@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field, model_validator
 
 from .integrations import EmailInput, EventInput
 from .memory import search_memory
@@ -29,6 +29,25 @@ class CalendarToolInput(EventInput):
 class CalendarSelection(BaseModel):
     event_id: str
     calendar_id: str = "primary"
+
+
+class GmailReadArguments(BaseModel):
+    query: str = Field(default="", max_length=2000)
+    include_bodies: bool = False
+    read_limit: int = Field(default=1, ge=1, le=3)
+
+
+class CalendarReadArguments(BaseModel):
+    calendar_id: str = Field(default="primary", max_length=200)
+    time_min: AwareDatetime
+    time_max: AwareDatetime
+    query: str = Field(default="", max_length=2000)
+
+    @model_validator(mode="after")
+    def bounded_range(self):
+        if self.time_max <= self.time_min or self.time_max - self.time_min > timedelta(days=366):
+            raise ValueError("Calendar range must be positive and no longer than one year")
+        return self
 
 
 @router.post("/api/google/gmail/reply")
@@ -73,8 +92,88 @@ async def google_chat_action(app, route: str, prompt: str) -> dict:
     if not model:
         raise RuntimeError("Choose a local model to interpret the requested Google action")
     services = app.state.integration_services
+    if not services.google.status().get("connected"):
+        raise IntegrationError(
+            "Google is not connected. Import Desktop OAuth credentials and connect Google in Settings.",
+            "google_not_connected",
+            503,
+        )
     timestamp = datetime.now(ZoneInfo(settings.time_zone))
     system = f"Interpret the user's request into the supplied schema. Current local datetime is {timestamp.isoformat()}, timezone {settings.time_zone}. Do not invent missing recipient, event ID, date, or duration. Event IDs must come from supplied real event evidence. If a required fact is missing return empty strings; validation will request clarification."
+    if route in {"gmail_search", "gmail_read"}:
+        async with asyncio.timeout(90), app.state.model_queue.lock:
+            arguments = await app.state.llm.structured(
+                model,
+                [
+                    {
+                        "role": "system",
+                        "content": system
+                        + " Convert sender, subject, keywords, and relative dates into Gmail search syntax (from:, subject:, after:YYYY/MM/DD, before:YYYY/MM/DD, newer_than:). Do not invent a sender email address; a sender name is a valid search term. Set include_bodies=true when the user asks to read, summarize, or answer a question about email contents. Use query empty only for an unfiltered recent inbox request. Never invent thread IDs.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                GmailReadArguments,
+            )
+        needs_bodies = route == "gmail_read" or arguments.include_bodies
+        limit = min(arguments.read_limit, settings.max_steps - 1)
+        if needs_bodies and limit < 1:
+            raise ValueError(
+                "Searching and reading an email needs at least two tool steps. Increase max steps in Settings."
+            )
+        matched = await services.google.threads(arguments.query)
+        threads = matched.get("threads", [])
+        bodies = (
+            await asyncio.gather(
+                *(services.google.thread(thread["id"]) for thread in threads[:limit])
+            )
+            if needs_bodies
+            else []
+        )
+        return {
+            "content": json.dumps(
+                {
+                    "search_query": arguments.query,
+                    "matched_first_page": len(threads),
+                    "threads": bodies if needs_bodies else threads,
+                    "additional_pages": bool(matched.get("next_page_token")),
+                },
+                ensure_ascii=False,
+            ),
+            "threads": bodies if needs_bodies else threads,
+            "arguments": arguments.model_dump(),
+            "tool_steps": {
+                "search": 1,
+                "read": len(bodies),
+                "total": 1 + len(bodies),
+                "budget": settings.max_steps,
+            },
+        }
+    if route == "calendar_read":
+        async with asyncio.timeout(90), app.state.model_queue.lock:
+            arguments_calendar = await app.state.llm.structured(
+                model,
+                [
+                    {
+                        "role": "system",
+                        "content": system
+                        + " Resolve the requested date window precisely in the user's timezone. Today/tomorrow mean midnight-to-midnight local dates. A specific Friday means that day's window, not the next seven days. Use upcoming seven days only if no date window was requested. Return RFC3339 timestamps with timezone offsets.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                CalendarReadArguments,
+            )
+        events = await services.google.events(
+            arguments_calendar.calendar_id,
+            arguments_calendar.time_min.isoformat(),
+            arguments_calendar.time_max.isoformat(),
+            arguments_calendar.query,
+        )
+        return {
+            "content": json.dumps(events, ensure_ascii=False),
+            "events": events.get("items", []),
+            "arguments": arguments_calendar.model_dump(mode="json"),
+            "tool_steps": {"total": 1, "budget": settings.max_steps},
+        }
     if route in {"gmail_send", "gmail_draft"}:
         async with asyncio.timeout(120), app.state.model_queue.lock:
             email = await app.state.llm.structured(

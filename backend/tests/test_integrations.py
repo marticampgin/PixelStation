@@ -307,6 +307,144 @@ async def test_comfy_cancellation_uses_submitted_endpoint_after_settings_change(
     assert ("POST", "/interrupt", 8188) in requests
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_phase", ["history", "download"])
+async def test_comfy_remote_cleanup_after_history_or_download_failure(tmp_path: Path, failure_phase: str) -> None:
+    calls = []
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.url.path == "/prompt":
+            return httpx.Response(200, json={"prompt_id": "own-prompt"})
+        if request.url.path == "/history/own-prompt":
+            if failure_phase == "history":
+                return httpx.Response(503)
+            return httpx.Response(200, json={"own-prompt": {"status": {"completed": True}, "outputs": {
+                "9": {"images": [{"filename": "actual.png", "subfolder": "", "type": "output"}]}}}})
+        if request.url.path == "/view":
+            return httpx.Response(503)
+        if request.url.path == "/queue" and request.method == "GET":
+            return httpx.Response(200, json={"queue_running": [[0, "own-prompt", {}, {}]] if failure_phase == "history" else []})
+        return httpx.Response(200, json={})
+
+    provider = ComfyImageProvider(tmp_path, lambda: "http://127.0.0.1:8188", lambda: "", transport=httpx.MockTransport(serve))
+    graph, bindings = workflow()
+    imported = provider.import_workflow("Cleanup test", graph, bindings)
+    job = await provider.start_generation("Actual prompt", workflow_id=imported["id"])
+    await asyncio.wait_for(provider.tasks[job["id"]], timeout=1)
+    failed = provider.job(job["id"])
+    assert failed["status"] == "failed"
+    assert not failed["remote_cleanup_required"]
+    assert ("POST", "/queue") in calls
+    assert (("POST", "/interrupt") in calls) == (failure_phase == "history")
+
+
+@pytest.mark.asyncio
+async def test_comfy_failed_remote_cleanup_remains_retryable_at_submitted_endpoint(tmp_path: Path) -> None:
+    reachable = [False]
+    endpoint = ["http://127.0.0.1:8188"]
+    calls = []
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path, request.url.port))
+        assert request.url.port == 8188
+        if request.url.path == "/prompt":
+            return httpx.Response(200, json={"prompt_id": "own-prompt"})
+        if request.url.path == "/history/own-prompt":
+            return httpx.Response(503)
+        if not reachable[0]:
+            raise httpx.ConnectError("Endpoint temporarily unavailable", request=request)
+        if request.url.path == "/queue" and request.method == "GET":
+            return httpx.Response(200, json={"queue_running": [[0, "own-prompt", {}, {}]]})
+        return httpx.Response(200, json={})
+
+    provider = ComfyImageProvider(tmp_path, lambda: endpoint[0], lambda: "", transport=httpx.MockTransport(serve))
+    graph, bindings = workflow()
+    imported = provider.import_workflow("Cleanup test", graph, bindings)
+    job = await provider.start_generation("Actual prompt", workflow_id=imported["id"])
+    await asyncio.wait_for(provider.tasks[job["id"]], timeout=1)
+    failed = provider.job(job["id"])
+    assert failed["status"] == "failed" and failed["remote_cleanup_required"]
+    assert "may still be running" in failed["error"]
+    endpoint[0] = "http://127.0.0.1:8189"
+    reachable[0] = True
+    retried = await provider.cancel(job["id"])
+    assert retried["status"] == "cancelled" and not retried["remote_cleanup_required"]
+    assert ("POST", "/interrupt", 8188) in calls
+
+
+def test_comfy_legacy_running_job_migration_retains_remote_cleanup_control(tmp_path: Path) -> None:
+    root = tmp_path / "images"
+    root.mkdir()
+    with sqlite3.connect(root / "library.sqlite3") as db:
+        db.execute("CREATE TABLE jobs(id TEXT PRIMARY KEY,payload TEXT NOT NULL,status TEXT NOT NULL,progress REAL NOT NULL DEFAULT 0,prompt_id TEXT,error TEXT,created_at TEXT NOT NULL)")
+        db.execute("INSERT INTO jobs(id,payload,status,prompt_id,created_at) VALUES('legacy','{}','running','old-prompt','date')")
+    reopened = ComfyImageProvider(tmp_path, lambda: "http://127.0.0.1:8188", lambda: "")
+    job = reopened.job("legacy")
+    assert job["status"] == "interrupted" and job["remote_cleanup_required"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action,method", [("calendar_create", "POST"), ("calendar_update", "PATCH")])
+async def test_google_accepted_calendar_mutation_preserves_id_when_verification_fails(tmp_path: Path, action: str, method: str) -> None:
+    calls = []
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        calls.append(request.method)
+        if request.method == method:
+            return httpx.Response(200, json={"id": "accepted-event-id"})
+        return httpx.Response(503)
+
+    connector = GoogleConnector(tmp_path, transport=httpx.MockTransport(serve), credential_loader=lambda: "test-token")
+    with pytest.raises(IntegrationError) as error:
+        await connector.mutate_event(action, "primary", event=event(), event_id="existing-event" if action == "calendar_update" else None)
+    assert error.value.code == "accepted_unverified"
+    assert error.value.details == {"accepted": True, "operation": action, "returned_id": "accepted-event-id"}
+    assert "accepted-event-id" in str(error.value) and "Inspect Google Calendar" in str(error.value)
+    assert calls.count(method) == 1
+
+
+@pytest.mark.asyncio
+async def test_google_accepted_draft_preserves_id_when_reopen_fails(tmp_path: Path) -> None:
+    def serve(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"id": "accepted-draft-id"}) if request.method == "POST" else httpx.Response(503)
+    connector = GoogleConnector(tmp_path, transport=httpx.MockTransport(serve), credential_loader=lambda: "test-token")
+    with pytest.raises(IntegrationError) as error:
+        await connector.create_draft(to="client@example.com", subject="Reply", body="Reviewed")
+    assert error.value.details["returned_id"] == "accepted-draft-id"
+    assert error.value.details["operation"] == "gmail_draft"
+    assert "Inspect Gmail Drafts" in str(error.value)
+
+
+def test_google_accepted_result_is_returned_by_api_and_persisted_without_replay(tmp_path: Path) -> None:
+    mutations = []
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            mutations.append(request)
+            return httpx.Response(200, json={"id": "accepted-event-id"})
+        return httpx.Response(503)
+
+    service = services(tmp_path)
+    service.google = GoogleConnector(tmp_path, transport=httpx.MockTransport(serve), credential_loader=lambda: "test-token")
+    app = FastAPI()
+    app.include_router(create_integrations_router(service))
+    with TestClient(app) as client:
+        proposed = client.post("/api/google/calendar/events", json={"event": event()}).json()
+        id_ = proposed["approval"]["id"]
+        confirmed = client.post(f"/api/integrations/approvals/{id_}/confirm", json={"confirmed": True})
+        assert confirmed.status_code == 503
+        detail = confirmed.json()["detail"]
+        assert detail["accepted"] and detail["returned_id"] == "accepted-event-id"
+        assert detail["operation"] == "calendar_create"
+        assert client.post(f"/api/integrations/approvals/{id_}/confirm", json={"confirmed": True}).status_code == 409
+    with service.approvals.db() as db:
+        row = db.execute("SELECT status,result FROM approvals WHERE id=?", (id_,)).fetchone()
+        assert row["status"] == "failed"
+        assert json.loads(row["result"])["returned_id"] == "accepted-event-id"
+    assert len(mutations) == 1
+
+
 def test_workflow_binding_validation_and_restart_recovery(tmp_path: Path) -> None:
     provider = ComfyImageProvider(tmp_path, lambda: "", lambda: "")
     with pytest.raises(IntegrationError, match="API format"):
