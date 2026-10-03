@@ -52,14 +52,14 @@ Prefer the official registry model for chat and structured roles. A live follow-
 
 ## Workspaces
 
-- **Chats:** persistent conversations, streaming replies, search, rename, archive/delete, attachment input, message feedback and copy/regeneration actions.
+- **Chats:** persistent conversations, streaming replies, search, rename, archive/delete, attachment input, message feedback and copy/regeneration actions. Chats and Games expand independently; chat rows reveal a confirmed-delete control on hover or keyboard focus.
 - **Files:** local uploads, parsed sections, file questions and deterministic TXT, Markdown, CSV, XLSX, DOCX and PDF generation. Reviewed edits require confirmation and preserve the previous version. Original uploads are deduplicated by content hash. The paperclip is the chat attachment control.
 - **Memory:** explicit and extracted memories, search, categories, pinning, edits, revisions and source provenance. Automatic candidates must cite an actual user message from the summarized batch; uncited candidates are skipped. Conversation summaries keep older turns out of the immediate context window. Retrieval remains useful through lexical search when embeddings are unavailable.
 - **Web:** configured SearXNG searches and bounded research with actual retrieved sources. HTTP fetching rejects non-public network targets and enforces resource limits.
 - **Image Studio:** direct ComfyUI workflows, prompt/seed/dimension controls, real generation jobs and a persistent image library. Image prompts are not rewritten automatically by a chat model.
 - **Gmail / Calendar:** official Google API connectors, after personal OAuth setup. Email sending and Calendar changes require application-enforced confirmation. Explicitly requested Gmail draft creation is reversible and verified through the API.
-- **Games:** one implementation, no-limit Texas Hold'em. Deterministic dealing, hand evaluation, betting and side-pot accounting; each AI player receives only its own cards and public information. Invalid or unavailable model actions use a surfaced legal fallback.
-- **Settings:** local models, provider endpoints, memory/context limits, harness reports and data management.
+- **Games:** 2–6 seat no-limit Texas Hold'em with distinct fox portraits, a highlighted current actor, adjustable action pacing and chip movement. Each opponent action and street reveal is saved before the next is requested; the timestamped log records paid chips and pot changes. Deterministic dealing, betting, hand evaluation and side pots protect chip accounting; AI players receive only their own cards and public information. Invalid or unavailable model actions use a surfaced legal fallback. Leaving pauses the next move; returning resumes the saved actor.
+- **Settings:** local models, provider endpoints, memory/context limits and data management. The local [watchtower](docs/EVALUATIONS.md) records measured outcomes, latency, native usage and known repairs/fallbacks; active versioned gates and manual native probes remain separate from passive statistics. Diagnostic JSON downloads exclude private content by default. Six research steps and four memories are conservative initial limits, not empirically tuned optima.
 
 Optional integrations show their real setup or connection errors until configured. They never fabricate search results, email, calendar entries or images.
 
