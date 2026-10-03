@@ -465,6 +465,7 @@ select option:disabled {
   overflow-x: hidden;
 }
 .context-panel .rail-scene {
+  background-image: url('/assets/panel-forest-right.png');
   height: 160px;
   opacity: 0.5;
 }

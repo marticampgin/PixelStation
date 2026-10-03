@@ -236,6 +236,7 @@ export function SettingsView({ station }: { station: Station }) {
                       <label key={role}>
                         {role.replaceAll('_', ' ')}
                         <select
+                          title={assigned}
                           value={assigned}
                           onChange={(event) =>
                             setSettings({

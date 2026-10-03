@@ -126,9 +126,13 @@ export const formatBytes = (bytes: number) =>
     : bytes < 1024 ** 2
       ? `${(bytes / 1024).toFixed(1)} KB`
       : `${(bytes / 1024 ** 2).toFixed(1)} MB`;
-export const modelLabel = (name: string) =>
-  name === 'pixel-station-lfm2.5:2.6b'
-    ? 'LFM2.5 · 2.6B Lite'
-    : /LFM2\.5.*2\.6B/i.test(name)
-      ? 'LFM2.5 · 2.6B'
-      : name.replace(/^hf\.co\/[^/]+\//, '').replace(/-GGUF:.*$/, '');
+export const modelLabel = (name: string) => {
+  if (name === 'pixel-station-lfm2.5:2.6b') return 'LFM2.5 · 2.6B · Local alias';
+  const registry = /^LiquidAI\/lfm2\.5-2\.6b(?::(.+))?$/i.exec(name);
+  if (registry)
+    return `LFM2.5 · 2.6B · Ollama${registry[1] && registry[1] !== 'latest' ? ` · ${registry[1]}` : ''}`;
+  const imported = /^hf\.co\/LiquidAI\/LFM2\.5-2\.6B-GGUF(?::(.+))?$/i.exec(name);
+  if (imported)
+    return `LFM2.5 · 2.6B · HF import${imported[1] && imported[1] !== 'Q4_K_M' ? ` · ${imported[1]}` : ''}`;
+  return name;
+};

@@ -80,6 +80,7 @@ export function App() {
               <Box size={22} />
               <select
                 aria-label="Active chat model"
+                title={station.model}
                 value={station.model}
                 onChange={(event) => station.setModel(event.target.value)}
               >

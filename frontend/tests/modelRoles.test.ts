@@ -48,4 +48,23 @@ describe('model routing capabilities', () => {
       liteModel,
     );
   });
+
+  it('distinguishes model sources and non-default tags without implying different weight sizes', () => {
+    expect(modelLabel('LiquidAI/lfm2.5-2.6b:latest')).toBe('LFM2.5 · 2.6B · Ollama');
+    expect(modelLabel('hf.co/LiquidAI/LFM2.5-2.6B-GGUF:Q4_K_M')).toBe('LFM2.5 · 2.6B · HF import');
+    expect(modelLabel(liteAlias)).toBe('LFM2.5 · 2.6B · Local alias');
+    expect(modelLabel('LiquidAI/lfm2.5-2.6b:custom')).toBe('LFM2.5 · 2.6B · Ollama · custom');
+    expect(modelLabel('hf.co/LiquidAI/LFM2.5-2.6B-GGUF:Q8_0')).toBe(
+      'LFM2.5 · 2.6B · HF import · Q8_0',
+    );
+  });
+
+  it.each([
+    'qwen3-embedding:0.6b',
+    'hf.co/Other/Custom-GGUF:Q4_K_M',
+    'my-LFM2.5-2.6B:experiment',
+    'pixel-station-lfm2.5:alternate',
+  ])('preserves the unknown model ID %s', (name) => {
+    expect(modelLabel(name)).toBe(name);
+  });
 });
