@@ -14,16 +14,21 @@
 - Local friction reports, regression candidates, idle persistent scheduling and consistent backups including nested databases and pending file replacements.
 - Custom dark navy/violet interface, separate desktop panel preferences, compact-screen drawers and real setup/error states for absent providers.
 - Single-command Windows launcher, developer guidance, provider setup documentation, actual UI screenshot and separate hashed CI dependencies.
-- Automated verification: **193 backend tests and 22 frontend tests pass**; Ruff, backend mypy, TypeScript production build and frontend formatting pass. GitHub's Linux CI passed with the universal hashed dependency lock.
+- Automated verification: **224 backend tests and 28 frontend tests pass**; Ruff, backend mypy, TypeScript production build and frontend formatting pass. GitHub's Linux CI passed with the universal hashed dependency lock, including the fresh functional fixes (runs 37120189618 and 37120508465).
 - Live Windows/API/UI verification: native GPU chat, attached-file answers with sources, memory edit/revision/restart, confirmed file edit/original revision, native conversation summary, 1024-dimensional memory/document embeddings, complete legal AI Poker hand without fallback, harness reports and launcher shutdown/restart.
 - Desktop 1536×1024 and compact 390×844 rendered checks; corrected model-control wrapping and overlapping mobile drawers. Optional services display their genuine unconfigured state.
 - Final in-app browser page identity, meaningful DOM, overlay, console and interaction checks passed. Independently toggled desktop panels survive reload; compact navigation closes its drawer and the exposed backdrop dismisses context.
 - Concept/render inspection compared copy, rail/header layout, typography, navy/violet palette, icon treatment, spacing and composer geometry. Intentional additions are functional history/search/archive controls and the installed alias's Lite label; empty Send is disabled. Default 1280×720 was also checked.
 - Successful native summaries persist independently of extraction. Automatic memories require an actual user-message source from their processed batch; unsupported candidates are skipped. Manual memories retain optional provenance.
+- Fresh real UI/API checks covered CSV task creation and browser download, all six document formats with download/reopen/parse verification, and complete three-player Poker games. The official model completed a legal all-in showdown without fallback; chip totals stayed at 3,000.
+- Corrected Poker raise bounds after opponent raises and removed next-hand advancement from exhausted tables. Live UI checks verified the raise value follows the new legal minimum and both human-win and human-bust tables show their completed state.
+- Chat validates tool protocol throughout the streamed response and resets rejected partial text before one bounded repair. Provider filtering discards separate and inline reasoning channels, including split and unterminated tags, while preserving public streaming and literal code/JSON examples.
+- Generated artifacts retain their requested names when sharing identical bytes. Real UI task/download/reopen checks verified `functionality-final.csv`, its exact two rows, the unchanged earlier filename and distinct records sharing one immutable blob. Per-record parse metadata and tests cover deletion/edit/revision isolation.
+- The final official-model conversation passed CSV creation followed by a three-step planning request, with every step below 15 words and no persisted reasoning or stale file claim. Ollama reported 100% GPU inference with an 8K context. A clean browser session had no console warnings/errors or horizontal overflow at 1536×1024; Poker state survived the app restart.
 
 ## Currently working
 
-- None for the initial local core build. Optional integration setup and the later extensions below remain separate work.
+- None for the requested functional verification. Tested fixes are committed and pushed; optional provider setup remains below.
 
 ## Blocked on account or system setup
 
@@ -49,6 +54,6 @@
 - Start with Lite defaults, one loaded model and bounded context on this machine.
 - Unavailable optional services display real setup states, never fake successful output.
 - Root agent owns commits; parallel workers own separate source modules.
-- A same-weight `pixel-station-lfm2.5:2.6b` alias repairs the imported HF LFM template's forced thinking; Lite prefers the alias when present. The official LiquidAI Ollama registry model is documented for fresh installs.
+- Lite prefers the installed official LiquidAI registry model with its native LFM renderer/parser. A multi-turn planning follow-up passed with that model after exposing stale artifact claims with the old handwritten HF alias template. The optional same-weight alias now also uses the native renderer/parser; a real schema-constrained CSV inference passed on Ollama 0.32.14.
 - External integrations stay optional and explicitly require their own service/account setup. Tests never substitute fake data into normal application behavior.
 - Maintenance output remains reviewable recommendations; the harness does not automatically modify or merge source.
