@@ -1,13 +1,14 @@
 import { AlertCircle, LoaderCircle, X } from 'lucide-react';
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useEffect, useId, useRef, type ReactNode } from 'react';
 
 export function PixelMark({ large = false }: { large?: boolean }) {
   return (
-    <span className={`pixel-mark ${large ? 'large' : ''}`} aria-hidden="true">
-      {Array.from({ length: 16 }, (_, i) => (
-        <i key={i} />
-      ))}
-    </span>
+    <img
+      className={`pixel-mark ${large ? 'large' : ''}`}
+      src="/assets/fox-logo.png"
+      alt=""
+      aria-hidden="true"
+    />
   );
 }
 
@@ -60,6 +61,7 @@ export function Modal({
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
   useEffect(() => {
     const dialog = ref.current;
     dialog?.showModal();
@@ -69,13 +71,14 @@ export function Modal({
     <dialog
       ref={ref}
       className="modal"
+      aria-labelledby={titleId}
       onCancel={onClose}
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
     >
       <div className="modal-title">
-        <h2>{title}</h2>
+        <h2 id={titleId}>{title}</h2>
         <button onClick={onClose} className="icon-button" aria-label="Close dialog">
           <X size={20} />
         </button>

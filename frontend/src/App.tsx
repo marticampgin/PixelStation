@@ -1,4 +1,4 @@
-import { Box, Menu, PanelRightClose, PanelRightOpen } from 'lucide-react';
+import { Box, ChevronsLeft, ChevronsRight, Menu } from 'lucide-react';
 import { useEffect } from 'react';
 import { ErrorNotice, modelLabel } from './components/ui';
 import { useStation } from './hooks/useStation';
@@ -31,18 +31,28 @@ export function App() {
   useEffect(() => {
     if (!drawerOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') station.closeCompactPanels();
+      if (event.key === 'Escape') {
+        station.closeCompactPanels();
+        document
+          .getElementById(station.leftOpen ? 'navigation-panel-toggle' : 'context-panel-toggle')
+          ?.focus();
+      }
     };
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
-  }, [drawerOpen, station.closeCompactPanels]);
+  }, [drawerOpen, station.leftOpen, station.closeCompactPanels]);
   return (
     <div className="app-shell">
       {drawerOpen ? (
         <button
-          className="drawer-backdrop"
+          className={`drawer-backdrop ${station.leftOpen ? 'behind-left' : 'behind-right'}`}
           aria-label="Close panel"
-          onClick={station.closeCompactPanels}
+          onClick={() => {
+            station.closeCompactPanels();
+            document
+              .getElementById(station.leftOpen ? 'navigation-panel-toggle' : 'context-panel-toggle')
+              ?.focus();
+          }}
         />
       ) : null}
       <Sidebar station={station} />
@@ -50,6 +60,7 @@ export function App() {
         <header className="topbar">
           {station.compact ? (
             <button
+              id="navigation-panel-toggle"
               className="icon-button"
               aria-label={station.leftOpen ? 'Collapse sidebar' : 'Expand sidebar'}
               aria-expanded={station.leftOpen}
@@ -95,14 +106,15 @@ export function App() {
             </label>
             <span className="topbar-divider" />
             <button
-              className="icon-button"
+              id="context-panel-toggle"
+              className="icon-button panel-toggle"
               aria-label={station.rightOpen ? 'Collapse context panel' : 'Expand context panel'}
               title={station.rightOpen ? 'Collapse context panel' : 'Expand context panel'}
               aria-expanded={station.rightOpen}
               aria-controls="context-panel"
               onClick={() => station.setRightOpen((value) => !value)}
             >
-              {station.rightOpen ? <PanelRightClose size={22} /> : <PanelRightOpen size={22} />}
+              {station.rightOpen ? <ChevronsRight size={18} /> : <ChevronsLeft size={18} />}
             </button>
           </div>
         </header>
