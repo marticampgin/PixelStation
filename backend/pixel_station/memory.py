@@ -358,7 +358,7 @@ async def _compact_locked(app, conversation_id: str) -> None:
                 [
                     {
                         "role": "system",
-                        "content": "Extract only explicitly stated stable user preferences, facts, projects, or events. No guesses, no assistant claims, no private email content. Skip trivial exchanges. Set should_store=false when uncertain. Set source_message_id to the actual user message ID in brackets that supports this memory, or null if unclear. Leave source_conversation_id null; the application assigns it.",
+                        "content": "Extract only explicitly stated stable user preferences, facts, projects, or events. No guesses, no assistant claims, no private email content. Skip trivial exchanges. Set should_store=false when uncertain. Automatic memories require source_message_id to be the actual user message ID in brackets supporting the memory; omit the candidate if its supporting source is unclear. Leave source_conversation_id null; the application assigns it.",
                     },
                     {"role": "user", "content": extraction_transcript},
                 ],
@@ -369,11 +369,13 @@ async def _compact_locked(app, conversation_id: str) -> None:
                 return
             user_ids = {row.id for row in batch if row.role == "user"}
             for candidate in extraction.candidates:
-                if candidate.should_store and candidate.confidence >= 0.75:
+                if (
+                    candidate.should_store
+                    and candidate.confidence >= 0.75
+                    and candidate.source_message_id in user_ids
+                ):
                     data = candidate.model_dump(exclude={"should_store"})
                     data["source_conversation_id"] = conversation_id
-                    if data.get("source_message_id") not in user_ids:
-                        data["source_message_id"] = None
                     create_memory(session, MemoryInput(**data))
     except Exception as exc:
         with app.state.database.session() as session:

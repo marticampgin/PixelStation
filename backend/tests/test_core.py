@@ -633,13 +633,24 @@ async def test_periodic_summary_and_memory_provenance(app):
         session.flush()
         cid = conversation.id
         for index in range(2):
-            session.add(
-                Message(
-                    conversation_id=cid, role="user", content=f"I prefer local inference {index}"
-                )
+            user = Message(
+                conversation_id=cid, role="user", content=f"I prefer local inference {index}"
             )
+            session.add(user)
+            session.flush()
+            supporting_id = user.id
             session.add(Message(conversation_id=cid, role="assistant", content="Understood"))
         session.commit()
+    original_structured = app.state.llm.structured
+
+    async def structured(model, messages, schema, **kwargs):
+        result = await original_structured(model, messages, schema, **kwargs)
+        if schema.__name__ == "ExtractionOutput":
+            result.candidates[0].source_message_id = supporting_id
+            result.candidates[0].source_conversation_id = "invented-conversation"
+        return result
+
+    app.state.llm.structured = structured
     await compact_conversation(app, cid)
     with app.state.database.session() as session:
         conversation = session.get(Conversation, cid)
@@ -647,9 +658,68 @@ async def test_periodic_summary_and_memory_provenance(app):
         assert "local project" in conversation.summary
         memory = session.scalar(select(Memory))
         assert memory.source_conversation_id == cid
-        assert (
-            memory.source_message_id is None
-        )  # Unspecified evidence is not assigned a guessed message ID.
+        assert memory.source_message_id == supporting_id
+
+
+async def test_automatic_memory_requires_a_user_source_from_the_processed_batch(app):
+    from pixel_station.database import Conversation, Memory
+    from pixel_station.memory import compact_conversation
+
+    settings = app.state.settings()
+    settings.roles["primary_chat"] = "local-test:latest"
+    settings.summary_turns = 2
+    app.state.set_settings(settings)
+    with app.state.database.session() as session:
+        conversation = Conversation()
+        other_conversation = Conversation()
+        session.add_all([conversation, other_conversation])
+        session.flush()
+        cid = conversation.id
+        user = Message(conversation_id=cid, role="user", content="I prefer quiet workspaces")
+        assistant = Message(conversation_id=cid, role="assistant", content="Understood")
+        foreign_user = Message(
+            conversation_id=other_conversation.id, role="user", content="Elsewhere"
+        )
+        session.add_all([user, assistant, foreign_user])
+        session.add(Message(conversation_id=cid, role="user", content="Respond in one sentence"))
+        session.add(Message(conversation_id=cid, role="assistant", content="Ready"))
+        session.flush()
+        sources = [None, "invented-message", assistant.id, foreign_user.id]
+        user_id = user.id
+        session.commit()
+
+    async def structured(model, messages, schema, **kwargs):
+        if schema.__name__ == "SummaryOutput":
+            return schema(summary="User's workspace preference")
+        return schema(
+            candidates=[
+                {
+                    "text": f"Unsupported candidate {index}",
+                    "source_message_id": source,
+                    "confidence": 0.95,
+                }
+                for index, source in enumerate(sources)
+            ]
+            + [
+                {
+                    "text": "Prefers quiet workspaces",
+                    "source_message_id": user_id,
+                    "confidence": 0.95,
+                }
+            ]
+        )
+
+    app.state.llm.structured = structured
+    await compact_conversation(app, cid)
+    with app.state.database.session() as session:
+        memories = list(session.scalars(select(Memory)))
+        assert len(memories) == 1
+        assert memories[0].text == "Prefers quiet workspaces"
+        assert memories[0].source_message_id == user_id
+        assert memories[0].source_conversation_id == cid
+        # Provenance stays optional for explicit manual memories.
+        manual = create_memory(session, MemoryInput(text="Manually supplied preference"))
+        assert manual.source_message_id is None
 
 
 async def test_concrete_registry_core_tools_execute(app):
