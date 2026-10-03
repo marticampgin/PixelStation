@@ -93,6 +93,60 @@ class OllamaProvider:
                 "Select an installed local model in Settings. Cloud models are disabled."
             )
 
+    async def unload_loaded(self, *, transport=None) -> dict:
+        """Release only freshly observed resident models; never submit a prompt.
+
+        The caller holds the application's shared inference lock. A second /ps
+        proves absence rather than treating a successful unload request as proof.
+        """
+        base = self.get_settings().ollama_url
+
+        def snapshot(response: httpx.Response) -> list[dict]:
+            response.raise_for_status()
+            body = response.json()
+            raw = body.get("models") if isinstance(body, dict) else None
+            if not isinstance(raw, list) or len(raw) > 16:
+                raise OllamaError("Ollama returned an invalid or oversized resident-model list")
+            result = []
+            for item in raw:
+                name = (item.get("name") or item.get("model")) if isinstance(item, dict) else None
+                if not isinstance(name, str) or not name or len(name) > 512:
+                    raise OllamaError("Ollama returned an invalid resident model name")
+                self._validate_model(name)
+                facts: dict[str, Any] = {"name": name}
+                for key in ("digest", "size", "size_vram", "context_length"):
+                    value = item.get(key)
+                    valid = isinstance(value, str) if key == "digest" else (
+                        isinstance(value, int) and not isinstance(value, bool) and value >= 0
+                    )
+                    if valid:
+                        facts[key] = value
+                result.append(facts)
+            return result
+
+        async with asyncio.timeout(30), httpx.AsyncClient(
+            timeout=10, transport=transport, trust_env=False
+        ) as client:
+            before = snapshot(await client.get(base + "/api/ps"))
+            unloaded = []
+            for name in dict.fromkeys(item["name"] for item in before):
+                response = await client.post(
+                    base + "/api/generate",
+                    json={"model": name, "stream": False, "keep_alive": 0},
+                )
+                response.raise_for_status()
+                body = response.json()
+                if not isinstance(body, dict) or body.get("error"):
+                    raise OllamaError("Ollama rejected the resident-model release request")
+                unloaded.append(name)
+            after = snapshot(await client.get(base + "/api/ps"))
+            if after:
+                raise OllamaError(
+                    "Ollama still has resident models after release. Close other inference clients and retry Image Studio."
+                )
+        return {"confirmed_absent": True, "before": before, "after": after,
+                "unloaded_models": unloaded}
+
     async def models(self) -> dict:
         import time
 

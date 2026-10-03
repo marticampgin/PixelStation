@@ -10,7 +10,7 @@ import secrets
 import sqlite3
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -28,7 +28,9 @@ def now() -> str:
 
 class ComfyImageProvider:
     def __init__(self, data_dir: Path, endpoint: Callable[[], str], default_workflow: Callable[[], str],
-                 *, transport: httpx.AsyncBaseTransport | None = None, timeout: float = 600) -> None:
+                 *, transport: httpx.AsyncBaseTransport | None = None, timeout: float = 600,
+                 inference_lock: asyncio.Lock | None = None,
+                 before_generation: Callable[[], Awaitable[dict]] | None = None) -> None:
         self.root = (data_dir / "images").resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.db_path = self.root / "library.sqlite3"
@@ -36,6 +38,7 @@ class ComfyImageProvider:
         self.transport, self.timeout = transport, timeout
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.lock = asyncio.Lock()
+        self.inference_lock, self.before_generation = inference_lock, before_generation
         with self.db() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS workflows(id TEXT PRIMARY KEY,name TEXT NOT NULL,workflow TEXT NOT NULL,bindings TEXT NOT NULL,created_at TEXT NOT NULL);
@@ -148,6 +151,20 @@ class ComfyImageProvider:
         with self.db() as db:
             db.execute(f"UPDATE jobs SET {','.join(k+'=?' for k in kwargs)} WHERE id=?", (*kwargs.values(), id_))
 
+    def _handoff(self, id_: str, stage: str, facts: dict[str, Any]) -> None:
+        with self.db() as db:
+            row = db.execute("SELECT payload FROM jobs WHERE id=?", (id_,)).fetchone()
+            payload = json.loads(row[0])
+            payload.setdefault("residency_handoff", {})[stage] = facts
+            db.execute("UPDATE jobs SET payload=? WHERE id=?", (json.dumps(payload), id_))
+
+    def _warning(self, id_: str, message: str) -> None:
+        with self.db() as db:
+            row = db.execute("SELECT payload FROM jobs WHERE id=?", (id_,)).fetchone()
+            payload = json.loads(row[0])
+            payload["handoff_warning"] = message
+            db.execute("UPDATE jobs SET payload=? WHERE id=?", (json.dumps(payload), id_))
+
     async def _progress(self, id_: str, client_id: str, endpoint: str) -> None:
         import websockets
         parsed = urlsplit(endpoint_url(endpoint))
@@ -173,9 +190,33 @@ class ComfyImageProvider:
     async def _run(self, id_: str, payload: dict[str, Any]) -> None:
         progress_task = None
         prompt_id = None
+        own_acquired = shared_acquired = False
+        submitted = submission_uncertain = confirmed_inactive = False
+        terminal_status, terminal_error = "failed", None
         base = endpoint_url(payload.get("endpoint") or self.endpoint())
         try:
-            async with self.lock:
+            # The budget includes both queue waits, residency handoff and execution.
+            async with asyncio.timeout(self.timeout):
+                await self.lock.acquire()
+                own_acquired = True
+                if self.inference_lock is not None:
+                    await self.inference_lock.acquire()
+                    shared_acquired = True
+                if self.before_generation:
+                    try:
+                        released = await self.before_generation()
+                    except (httpx.HTTPError, ValueError, OSError, RuntimeError, TimeoutError) as exc:
+                        self._handoff(id_, "ollama", {"confirmed_absent": False})
+                        raise IntegrationError(
+                            f"Ollama residency release could not be confirmed: {str(exc)[:400]}. Close other inference clients or check Ollama, then retry.",
+                            "residency_release_failed",
+                        ) from exc
+                    if not isinstance(released, dict) or released.get("confirmed_absent") is not True:
+                        self._handoff(id_, "ollama", {"confirmed_absent": False})
+                        raise IntegrationError("Ollama model absence was not confirmed. Check resident models before retrying Image Studio.", "residency_release_failed")
+                    self._handoff(id_, "ollama", released)
+                elif shared_acquired:
+                    self._handoff(id_, "ollama", {"status": "release_callback_unavailable"})
                 workflow, bindings = self._workflow(payload["workflow_id"])
                 workflow = copy.deepcopy(workflow)
                 for key, binding in bindings.items():
@@ -184,23 +225,33 @@ class ComfyImageProvider:
                 if self.transport is None:
                     progress_task = asyncio.create_task(self._progress(id_, client_id, base))
                 async with httpx.AsyncClient(timeout=30, transport=self.transport, trust_env=False) as client:
+                    submitted = submission_uncertain = True
                     response = await client.post(base + "/prompt", json={"prompt": workflow, "client_id": client_id})
                     response.raise_for_status()
-                    submitted = response.json()
-                    prompt_id = submitted.get("prompt_id") if isinstance(submitted, dict) else None
-                    if not isinstance(prompt_id, str) or not prompt_id or submitted.get("node_errors"):
+                    receipt = response.json()
+                    prompt_id = receipt.get("prompt_id") if isinstance(receipt, dict) else None
+                    if not isinstance(prompt_id, str) or not prompt_id or receipt.get("node_errors"):
+                        submission_uncertain = False
+                        confirmed_inactive = True
+                        prompt_id = None
                         raise IntegrationError("ComfyUI rejected this workflow. Verify its nodes and installed models.", "workflow_rejected")
+                    submission_uncertain = False
                     self._update(id_, status="running", prompt_id=prompt_id, remote_cleanup_required=True)
-                    deadline = time.monotonic() + self.timeout
-                    while time.monotonic() < deadline:
+                    while True:
                         response = await client.get(base + "/history/" + prompt_id)
                         response.raise_for_status()
-                        history = response.json().get(prompt_id)
+                        body = response.json()
+                        if not isinstance(body, dict):
+                            raise IntegrationError("ComfyUI returned invalid history data.", "invalid_history")
+                        history = body.get(prompt_id)
                         if history:
+                            if not isinstance(history, dict) or not isinstance(history.get("status", {}), dict):
+                                raise IntegrationError("ComfyUI returned invalid job state.", "invalid_history")
                             status = history.get("status", {})
                             if status.get("status_str") == "error":
                                 raise IntegrationError("ComfyUI execution failed. Check its console and workflow models.", "execution_failed")
-                            if status.get("completed", False) or history.get("outputs"):
+                            if status.get("completed", False):
+                                confirmed_inactive = True
                                 self._update(id_, remote_cleanup_required=False)
                                 saved = 0
                                 for output in history.get("outputs", {}).values():
@@ -213,28 +264,137 @@ class ComfyImageProvider:
                                         break
                                 if not saved:
                                     raise IntegrationError("This workflow produced no saved image. Add a SaveImage output node.", "no_images")
-                                self._update(id_, status="complete", progress=1, remote_cleanup_required=False)
+                                terminal_status = "complete"
+                                self._update(id_, progress=1, remote_cleanup_required=False)
                                 return
                         await asyncio.sleep(1)
-                    raise IntegrationError("Image generation exceeded 10 minutes.", "generation_timeout")
         except asyncio.CancelledError:
-            self._update(id_, status="cancelled", error="Cancelled by user.")
+            terminal_status, terminal_error = "cancelled", "Cancelled by user."
             raise
-        except (httpx.HTTPError, IntegrationError, ValueError, OSError, TimeoutError) as exc:
-            message = str(exc) if isinstance(exc, IntegrationError) else "ComfyUI request failed. Check the local endpoint and console."
-            self._update(id_, status="failed", error=message)
-            if prompt_id:
-                try:
-                    async with httpx.AsyncClient(timeout=10, transport=self.transport, trust_env=False) as cleanup_client:
-                        await asyncio.wait_for(self._cancel_remote(cleanup_client, base, prompt_id), timeout=15)
-                    self._update(id_, remote_cleanup_required=False, error=message + " Remote prompt was removed or is no longer executing.")
-                except (httpx.HTTPError, IntegrationError, ValueError, TimeoutError):
-                    self._update(id_, remote_cleanup_required=True, error=message + " Remote cancellation could not be confirmed. ComfyUI may still be running this prompt; use Cancel again when its endpoint returns.")
+        except (httpx.HTTPError, IntegrationError, ValueError, OSError, RuntimeError, TimeoutError) as exc:
+            message = (
+                "Image generation exceeded its time budget, including inference queue waiting."
+                if isinstance(exc, TimeoutError)
+                else str(exc) if isinstance(exc, IntegrationError)
+                else "ComfyUI request failed. Check the local endpoint and console."
+            )
+            terminal_error = message
         finally:
-            if progress_task:
-                progress_task.cancel()
-                await asyncio.gather(progress_task, return_exceptions=True)
-            self.tasks.pop(id_, None)
+            try:
+                if prompt_id and terminal_status != "complete":
+                    confirmed_inactive = await self._cleanup(id_, base, prompt_id)
+                elif submission_uncertain:
+                    self._update(id_, remote_cleanup_required=True)
+                    self._warning(id_, "ComfyUI submission outcome is unknown. Inspect its queue before resuming local inference; no global interrupt or memory release was attempted.")
+                if shared_acquired and submitted and confirmed_inactive:
+                    await self._free_models(id_, base)
+            finally:
+                if progress_task:
+                    progress_task.cancel()
+                try:
+                    if progress_task:
+                        await asyncio.gather(progress_task, return_exceptions=True)
+                    error = self.job(id_).get("error") or terminal_error
+                    self._update(id_, status=terminal_status, error=error)
+                finally:
+                    if shared_acquired and self.inference_lock is not None:
+                        self.inference_lock.release()
+                    if own_acquired:
+                        self.lock.release()
+                    self.tasks.pop(id_, None)
+
+    async def _cleanup(self, id_: str, base: str, prompt_id: str) -> bool:
+        try:
+            async with asyncio.timeout(15), httpx.AsyncClient(
+                timeout=10, transport=self.transport, trust_env=False
+            ) as client:
+                await self._cancel_remote(client, base, prompt_id)
+            self._update(id_, remote_cleanup_required=False)
+            return True
+        except (httpx.HTTPError, IntegrationError, ValueError, TimeoutError):
+            message = "Remote cancellation could not be confirmed. ComfyUI may still be running this prompt; use Cancel again when its endpoint returns. Memory release was skipped."
+            self._update(id_, remote_cleanup_required=True, error=message)
+            self._warning(id_, message)
+            return False
+
+    async def _free_models(self, id_: str, base: str) -> None:
+        """Request model release only after own prompt is known inactive.
+
+        /free is an acknowledgement, not proof of a specific VRAM reduction.
+        Device counters before/after are recorded as reported, never estimated.
+        """
+        facts: dict[str, Any] = {"release_requested": False}
+
+        async def stats(client: httpx.AsyncClient) -> list[dict]:
+            response = await client.get(base + "/system_stats")
+            response.raise_for_status()
+            body = response.json()
+            devices = body.get("devices") if isinstance(body, dict) else None
+            if not isinstance(devices, list):
+                raise ValueError("ComfyUI memory counters unavailable")
+            return [
+                {key: value for key, value in item.items()
+                 if key in {"name", "type", "index", "vram_total", "vram_free", "torch_vram_total", "torch_vram_free"}
+                 and isinstance(value, (str, int, float)) and not isinstance(value, bool)}
+                for item in devices if isinstance(item, dict)
+            ]
+
+        try:
+            async with asyncio.timeout(15), httpx.AsyncClient(
+                timeout=5, transport=self.transport, trust_env=False
+            ) as client:
+                response = await client.get(base + "/queue")
+                response.raise_for_status()
+                queue = response.json()
+                if not isinstance(queue, dict) or any(
+                    not isinstance(queue.get(key), list) for key in ("queue_running", "queue_pending")
+                ):
+                    raise IntegrationError("Cannot verify ComfyUI is idle before releasing its models.", "invalid_queue")
+                if queue["queue_running"] or queue["queue_pending"]:
+                    facts["status"] = "other_jobs_active"
+                    self._warning(id_, "ComfyUI has other active or queued jobs. Memory release was skipped to preserve them; finish those jobs before loading chat models.")
+                    return
+                try:
+                    facts["before"] = await stats(client)
+                except (httpx.HTTPError, ValueError):
+                    facts["before"] = None
+                response = await client.post(base + "/free", json={"unload_models": True, "free_memory": True})
+                response.raise_for_status()
+                facts.update(release_requested=True, status="server_acknowledged")
+                try:
+                    facts["after"] = await stats(client)
+                    before = {
+                        row.get("index", offset): row.get("torch_vram_total")
+                        for offset, row in enumerate(facts["before"] or [])
+                        if isinstance(row.get("torch_vram_total"), (int, float))
+                        and row["torch_vram_total"] > 0
+                    }
+
+                    def reduced():
+                        return any(
+                            isinstance(row.get("torch_vram_total"), (int, float))
+                            and row["torch_vram_total"] < before.get(row.get("index", offset), 0)
+                            for offset, row in enumerate(facts["after"])
+                        )
+
+                    deadline = time.monotonic() + 3
+                    while before and not reduced() and time.monotonic() < deadline:
+                        await asyncio.sleep(0.2)
+                        facts["after"] = await stats(client)
+                    facts["hardware_release_observed"] = reduced()
+                    facts["observation_scope"] = "ComfyUI-reported torch residency reduction; no assertion that all GPU memory is free."
+                except (httpx.HTTPError, ValueError):
+                    facts["after"] = None
+                    self._warning(id_, "ComfyUI acknowledged model release but fresh VRAM counters are unavailable. Check GPU memory before loading a large chat model.")
+        except asyncio.CancelledError:
+            facts["status"] = "release_interrupted"
+            self._warning(id_, "ComfyUI memory-release observation was interrupted. The saved image is preserved; check GPU memory before loading a large chat model.")
+            raise
+        except (httpx.HTTPError, IntegrationError, ValueError, TimeoutError):
+            facts["status"] = "observation_unconfirmed" if facts["release_requested"] else "release_unconfirmed"
+            self._warning(id_, "ComfyUI memory release or its observation could not be confirmed. The image result is preserved; use ComfyUI's unload/free controls or stop it before loading large chat models.")
+        finally:
+            self._handoff(id_, "comfyui", facts)
 
     async def _download(self, client: httpx.AsyncClient, base: str, job_id: str, payload: dict[str, Any], image: dict[str, Any]) -> None:
         filename, subfolder = str(image.get("filename", "")), str(image.get("subfolder", ""))
@@ -285,23 +445,60 @@ class ComfyImageProvider:
         if not isinstance(queue, dict) or not isinstance(queue.get("queue_running"), list):
             raise IntegrationError("ComfyUI returned an invalid queue; remote cancellation could not be confirmed.", "invalid_queue")
         if any(item[1] == prompt_id for item in queue["queue_running"] if isinstance(item, list) and len(item) > 1):
-            response = await client.post(base + "/interrupt")
+            response = await client.post(base + "/interrupt", json={"prompt_id": prompt_id})
             response.raise_for_status()
+        if self.inference_lock is not None:
+            # An interrupt acknowledgement does not prove that execution stopped.
+            # Verify only our submitted ID; never interrupt a different prompt.
+            deadline = time.monotonic() + 10
+            while True:
+                response = await client.get(base + "/queue")
+                response.raise_for_status()
+                queue = response.json()
+                if not isinstance(queue, dict) or any(
+                    not isinstance(queue.get(key), list)
+                    for key in ("queue_running", "queue_pending")
+                ):
+                    raise IntegrationError("Remote queue state cannot be confirmed.", "invalid_queue")
+                if not any(
+                    len(item) > 1 and item[1] == prompt_id
+                    for key in ("queue_running", "queue_pending")
+                    for item in queue[key] if isinstance(item, list)
+                ):
+                    return
+                if time.monotonic() >= deadline:
+                    raise IntegrationError("Submitted prompt still appears in ComfyUI's queue.", "cancel_unconfirmed")
+                await asyncio.sleep(0.1)
 
     async def cancel(self, id_: str) -> dict[str, Any]:
-        job = self.job(id_)
         task = self.tasks.get(id_)
         if task:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        job = self.job(id_)
         if job.get("prompt_id") and (job["status"] in {"queued", "running"} or job.get("remote_cleanup_required")):
+            own_acquired = shared_acquired = False
             try:
-                async with httpx.AsyncClient(timeout=10, transport=self.transport, trust_env=False) as client:
-                    await asyncio.wait_for(self._cancel_remote(client, endpoint_url(job.get("endpoint") or self.endpoint()), job["prompt_id"]), timeout=15)
-                self._update(id_, status="cancelled", remote_cleanup_required=False, error="Cancellation requested; submitted prompt was removed or is no longer executing.")
+                async with asyncio.timeout(30):
+                    await self.lock.acquire()
+                    own_acquired = True
+                    if self.inference_lock is not None:
+                        await self.inference_lock.acquire()
+                        shared_acquired = True
+                    base = endpoint_url(job.get("endpoint") or self.endpoint())
+                    if not await self._cleanup(id_, base, job["prompt_id"]):
+                        raise IntegrationError("Remote cleanup remains unconfirmed.", "cancel_failed")
+                    self._update(id_, status="cancelled", remote_cleanup_required=False, error="Submitted prompt was removed or is no longer executing.")
+                    if shared_acquired:
+                        await self._free_models(id_, base)
             except (httpx.HTTPError, IntegrationError, ValueError, TimeoutError) as exc:
                 self._update(id_, status="cancelled", remote_cleanup_required=True, error="Stopped local polling; remote cancellation could not be confirmed. ComfyUI may still be running this prompt. Use Cancel again when its endpoint returns.")
                 raise IntegrationError("Stopped local polling; remote cancellation could not be confirmed. ComfyUI may still be running this prompt. Use Cancel again when its endpoint returns.", "cancel_failed") from exc
+            finally:
+                if shared_acquired and self.inference_lock is not None:
+                    self.inference_lock.release()
+                if own_acquired:
+                    self.lock.release()
         return self.job(id_)
 
     def image_path(self, id_: str) -> Path:

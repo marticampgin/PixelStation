@@ -117,6 +117,7 @@ export interface ImageJob {
   progress: number;
   images: GeneratedImage[];
   error?: string;
+  handoff_warning?: string;
   remote_cleanup_required?: boolean;
   prompt_id?: string | null;
 }

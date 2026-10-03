@@ -167,7 +167,9 @@ def create_app(data_dir: Path | None = None, llm=None, discover: bool = True) ->
     database.migrate()
     harness.recover_evaluations(app)
     app.state.integration_services = IntegrationServices(
-        app.state.data_dir, get_setting, set_setting
+        app.state.data_dir, get_setting, set_setting,
+        inference_lock=app.state.model_queue.lock,
+        before_image=getattr(app.state.llm, "unload_loaded", None),
     )
     app.add_middleware(
         TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]", "testserver"]

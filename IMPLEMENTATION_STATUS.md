@@ -14,7 +14,7 @@
 - Local friction reports, regression candidates, idle persistent scheduling and consistent backups including nested databases and pending file replacements.
 - Custom dark navy/violet interface, separate desktop panel preferences, compact-screen drawers and real setup/error states for absent providers.
 - Single-command Windows launcher, developer guidance, provider setup documentation, actual UI screenshot and separate hashed CI dependencies.
-- Automated verification: **305 backend tests and 51 frontend tests pass**; Ruff, backend mypy, TypeScript production build and frontend formatting pass. GitHub's Linux CI passed with the universal hashed dependency lock, including the Poker evidence, policy and strategy-gate increment (run 37138271693).
+- Automated verification: **321 backend tests and 53 frontend tests pass**; Ruff, backend mypy, TypeScript production build and frontend formatting pass. GitHub's Linux CI passed with the universal hashed dependency lock for the preceding Poker increment (run 37138734485); the image integration increment is verified locally.
 - Live Windows/API/UI verification: native GPU chat, attached-file answers with sources, memory edit/revision/restart, confirmed file edit/original revision, native conversation summary, 1024-dimensional memory/document embeddings, complete legal AI Poker hand without fallback, harness reports and launcher shutdown/restart.
 - Desktop 1536×1024 and compact 390×844 rendered checks; corrected model-control wrapping and overlapping mobile drawers. Optional services display their genuine unconfigured state.
 - Final in-app browser page identity, meaningful DOM, overlay, console and interaction checks passed. Independently toggled desktop panels survive reload; compact navigation closes its drawer and the exposed backdrop dismisses context.
@@ -32,16 +32,17 @@
 - Final rendered Chrome checks at 1448×1086 and 390×844 passed without horizontal overflow. The reference comparison covered branding, colors, rail/inspector layout, compact spacing, carets, scenery and composer placement. A fresh final tab had no console warnings/errors; the deliberately public README capture contains an empty conversation and no private history.
 - Poker decisions now receive own-card/public-board evidence, position, pot odds, stack exposure, transparent hand tiers and a bounded 128-sample random-opponent equity estimate. Subtle styles, capped raises/commitments, a free-check guard and price-aware fallback are enforced separately from model judgment; preflop strength does not bypass postflop risk checks. Whole decisions include context/queue/repair in a 15-second ceiling and retain finite decision labels without reasoning narratives.
 - Six additional isolated Poker gates and six separately opted-in native strategy scenarios expose legality versus risk/value quality, rejected actions, repairs, fallbacks and actual native usage. Runner 4 groups comparisons by both opted-in scopes and policy/context source hashes. Two normal six-seat hands conserved 6,000 chips with no preflop all-ins across 13 decisions; however, the last strategy trial passed only 2/6 native cases. Remaining judgment errors are recorded honestly; further prompt tuning was stopped at the user's request.
+- Installed checksum-verified official ComfyUI 0.38.0 Portable and the pinned official SD-Turbo FP16 files under ignored `.tools`. Real Image Studio and chat requests produced 512 × 512 PNGs; browser downloads matched saved bytes. Workflow/seed/library persistence, restart, queued cancellation and running cancellation were verified. The tested launcher disables the dynamic VRAM loader to avoid its observed SD-Turbo text-encoder error without modifying weights.
+- Image jobs share the existing inference lock with chat, Poker and idle model work, verify Ollama unloads before submission, and request ComfyUI memory release after confirmed completion/cancellation. Server acknowledgement and measured memory changes remain distinct; genuine handoff failures preserve completed images and show a notice. Studio dimension and seed bounds match the backend. Tests isolate import-time application initialization/recovery from live user data.
 
 ## Currently working
 
-- Poker prompt tuning is stopped; bounded behavior and failure measurements are in place. Beginning optional image-generation setup while Web and Google require owner/system steps.
+- Image generation is verified locally. Web research is next, followed by Gmail/Calendar; WSL enablement/restart and personal Google OAuth remain owner steps.
 
 ## Blocked on account or system setup
 
 - **Core application:** no installation blocker remains on this machine.
 - **Web research:** SearXNG is not installed/running. The documented Windows container setup requires Docker Desktop/WSL 2 and administrator/system setup.
-- **Image generation:** ComfyUI and image checkpoints are not installed/running. The adapter and workflow configuration are implemented, but no real generated image is claimed.
 - **Google:** Cloud project/OAuth credentials, personal login and consent require the owner. Live Gmail/Calendar account operations remain unverified; provider and approval behavior are covered with isolated tests.
 - A vision model is optional and currently unassigned. Scanned-document/OCR fallback may need first-use parsing model downloads.
 

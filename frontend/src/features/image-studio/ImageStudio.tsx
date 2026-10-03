@@ -280,9 +280,9 @@ export function ImageStudio({ station }: { station: Station }) {
               <input
                 type="number"
                 value={width}
-                min={64}
-                max={4096}
-                step={64}
+                min={256}
+                max={2048}
+                step={8}
                 onChange={(event) => setWidth(Number(event.target.value))}
               />
             </label>
@@ -291,9 +291,9 @@ export function ImageStudio({ station }: { station: Station }) {
               <input
                 type="number"
                 value={height}
-                min={64}
-                max={4096}
-                step={64}
+                min={256}
+                max={2048}
+                step={8}
                 onChange={(event) => setHeight(Number(event.target.value))}
               />
             </label>
@@ -304,7 +304,7 @@ export function ImageStudio({ station }: { station: Station }) {
               <input
                 type="number"
                 min={0}
-                max={2147483647}
+                max={Number.MAX_SAFE_INTEGER}
                 value={seed}
                 onChange={(event) => setSeed(event.target.value)}
                 placeholder="Random"
@@ -351,6 +351,11 @@ export function ImageStudio({ station }: { station: Station }) {
                 <X size={14} />
                 {running ? 'Cancel generation' : 'Retry remote cancellation'}
               </button>
+            </div>
+          ) : null}
+          {job?.handoff_warning ? (
+            <div className="notice" role="status" aria-label="Image memory handoff warning">
+              {job.handoff_warning}
             </div>
           ) : null}
         </form>

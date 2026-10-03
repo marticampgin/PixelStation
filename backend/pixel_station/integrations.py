@@ -7,7 +7,7 @@ import json
 import sqlite3
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -148,13 +148,15 @@ class ApprovalStore:
 
 
 class IntegrationServices:
-    def __init__(self, data_dir: Path, get_setting: Callable[[str, Any], Any], set_setting: Callable[[str, Any], None]) -> None:
+    def __init__(self, data_dir: Path, get_setting: Callable[[str, Any], Any], set_setting: Callable[[str, Any], None],
+                 *, inference_lock=None, before_image: Callable[[], Awaitable[dict]] | None = None) -> None:
         data_dir = Path(data_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
         self.get_setting, self.set_setting = get_setting, set_setting
         self.web = WebProvider(lambda: str(get_setting("searxng_url", "http://127.0.0.1:8888") or ""))
         self.images = ComfyImageProvider(data_dir, lambda: str(get_setting("comfyui_url", "http://127.0.0.1:8188") or ""),
-                                        lambda: str(get_setting("comfyui_default_workflow", "") or ""))
+                                        lambda: str(get_setting("comfyui_default_workflow", "") or ""),
+                                        inference_lock=inference_lock, before_generation=before_image)
         self.google = GoogleConnector(data_dir)
         self.approvals = ApprovalStore(data_dir / "integration_approvals.sqlite3")
 

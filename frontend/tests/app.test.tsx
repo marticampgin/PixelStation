@@ -339,6 +339,51 @@ describe('workstation interactions', () => {
     expect(retries).toBe(2);
   });
 
+  it.each([
+    'ComfyUI model release could not be confirmed; another remote job is running.',
+    undefined,
+  ])('preserves a completed image preview with handoff warning %s', async (warning) => {
+    localStorage.setItem('pixel-station:v1:image-job', '"completed-job"');
+    const image = {
+      id: 'completed-image',
+      prompt: 'Purple mountain at dusk',
+      seed: 42,
+      width: 512,
+      height: 512,
+      workflow_id: 'wf-one',
+      created_at: conversation.created_at,
+      content_url: '/api/images/completed-image/content',
+    };
+    const fetcher = mockApi((path) =>
+      path === '/api/images/jobs/completed-job'
+        ? json({
+            id: 'completed-job',
+            status: 'complete',
+            progress: 1,
+            images: [image],
+            handoff_warning: warning,
+          })
+        : undefined,
+    );
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: 'Image Studio' }));
+    const preview = await screen.findByRole('img', { name: image.prompt });
+    expect(preview).toHaveAttribute('src', image.content_url);
+    expect(preview).toBeVisible();
+    if (warning) {
+      expect(
+        await screen.findByRole('status', { name: 'Image memory handoff warning' }),
+      ).toHaveTextContent(warning);
+    } else {
+      expect(
+        screen.queryByRole('status', { name: 'Image memory handoff warning' }),
+      ).not.toBeInTheDocument();
+    }
+    expect(screen.queryByRole('button', { name: 'Cancel generation' })).not.toBeInTheDocument();
+    expect(fetcher).not.toHaveBeenCalledWith('/api/images/generate', expect.anything());
+  });
+
   it('offers compatible role models, keeps missing selections visible, and applies the installed official Lite model', async () => {
     const alias = 'pixel-station-lfm2.5:2.6b';
     const official = 'LiquidAI/lfm2.5-2.6b:latest';

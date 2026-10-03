@@ -67,7 +67,7 @@ Optional integrations show their real setup or connection errors until configure
 
 See [the integration guide](docs/INTEGRATIONS.md) for SearXNG, ComfyUI workflows and Google OAuth setup. Configuration examples are in `config/`.
 
-SearXNG is the default free search provider. Its documented container setup requires Docker Desktop/WSL 2 on Windows. ComfyUI is a separate native local service; its portable distribution includes its Python runtime. Image checkpoints are independent of chat models. SDXL-Lightning is a practical option to assess for a constrained GPU; larger FLUX workflows may require offloading or more memory. No large image model is downloaded automatically.
+SearXNG is the default free search provider. Its documented container setup requires Docker Desktop/WSL 2 on Windows. ComfyUI is a separate native local service; its portable distribution includes its Python runtime. Image models are independent of chat models. A complete SD-Turbo FP16 example starts at 512 pixels and one sampling step; SDXL-Lightning and larger FLUX workflows have different memory needs. After installing the portable runtime, `./start-comfyui.ps1` starts it locally. No image weights are bundled or downloaded automatically. See [setup and model guidance](docs/INTEGRATIONS.md#comfyui-on-windows).
 
 Google requires a Cloud project, enabled Gmail/Calendar APIs and a **Desktop App** OAuth client. Import the downloaded credentials through Settings, then complete your Google login and consent. An External OAuth application left in Testing can have refresh tokens expire after seven days for these scopes. The integration guide explains the personal-use production configuration and unverified-app behavior. OAuth tokens and credentials are never source-controlled.
 
