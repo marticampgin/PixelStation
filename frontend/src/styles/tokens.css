@@ -1,0 +1,135 @@
+:root {
+  font-family:
+    Inter,
+    'Segoe UI',
+    -apple-system,
+    BlinkMacSystemFont,
+    sans-serif;
+  color: #eeeef6;
+  background: #10111b;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  --background: #10111b;
+  --surface: #131420;
+  --surface-raised: #1a1b2b;
+  --border: #2b2c40;
+  --accent: #9c83ff;
+  --accent-strong: #8970ef;
+  --muted: #a0a2bc;
+  --text: #eeeef6;
+  --danger: #e59b9e;
+  --success: #a5c7b2;
+  --left-width: clamp(232px, 18.2vw, 280px);
+  --right-width: clamp(280px, 21.6vw, 332px);
+  --radius: 9px;
+  color-scheme: dark;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  font-size: 14px;
+}
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+button,
+a,
+input,
+select,
+textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+button {
+  cursor: pointer;
+  color: inherit;
+}
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+button {
+  border: 0;
+}
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+input,
+textarea,
+select {
+  color: var(--text);
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  min-width: 0;
+}
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted);
+  opacity: 0.9;
+}
+textarea {
+  resize: vertical;
+}
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--muted);
+}
+h1,
+h2,
+h3,
+p {
+  margin-top: 0;
+}
+h1 {
+  font-size: 25px;
+  font-weight: 560;
+  letter-spacing: -0.5px;
+}
+h2 {
+  font-size: 21px;
+  font-weight: 550;
+  letter-spacing: -0.35px;
+}
+h3 {
+  font-size: 15px;
+  font-weight: 550;
+}
+p {
+  line-height: 1.7;
+}
+code,
+pre {
+  font-family: 'Cascadia Code', Consolas, monospace;
+}
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+::-webkit-scrollbar-thumb {
+  background: #34354a;
+  border-radius: 8px;
+}
+::selection {
+  background: #614caf;
+  color: #fff;
+}
