@@ -19,7 +19,7 @@ def make_backup(app) -> Path:
     target_dir.mkdir(exist_ok=True)
     destination = target_dir / ("pixel-station-" + now().replace(":", "-") + ".zip")
     selected = list(data_dir.glob("*.db")) + list(data_dir.glob("*.sqlite3"))
-    for folder in ("files", "images", "generated", "workflows"):
+    for folder in ("files", "file_edits", "images", "generated", "workflows"):
         root = data_dir / folder
         if root.is_dir() and not root.is_symlink():
             selected.extend(root.rglob("*"))
