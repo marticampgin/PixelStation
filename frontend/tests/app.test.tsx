@@ -154,7 +154,7 @@ describe('workstation interactions', () => {
     mockApi();
     const user = userEvent.setup();
     render(<App />);
-    await screen.findByRole('option', { name: 'LFM2.5 · 2.6B' });
+    await screen.findByRole('option', { name: 'LFM2.5 · 2.6B · HF import' });
     await user.click(screen.getByRole('button', { name: 'Collapse sidebar' }));
     expect(localStorage.getItem('pixel-station:v1:left-open')).toBe('false');
     await user.click(screen.getAllByRole('button', { name: 'Collapse context panel' })[0]);
@@ -196,7 +196,7 @@ describe('workstation interactions', () => {
     });
     const user = userEvent.setup();
     const { container } = render(<App />);
-    await screen.findByRole('option', { name: 'LFM2.5 · 2.6B' });
+    await screen.findByRole('option', { name: 'LFM2.5 · 2.6B · HF import' });
     const file = new File(['Hello world'], 'notes.txt', { type: 'text/plain' });
     await user.upload(container.querySelector('input[type=file]')!, file);
     expect(
