@@ -8,11 +8,18 @@ import type { IntegrationStatus, Settings } from '../../types';
 import { GoogleSetup } from '../google/GoogleSetup';
 import { SearxSetup } from '../web/SearxSetup';
 import { HarnessReports, type HarnessReport } from './HarnessReports';
+import {
+  acceptsRole,
+  liteModel,
+  modelSetupCommand,
+  preferredLiteModel,
+  roleCapability,
+} from './modelRoles';
 
 const tabs = ['Models', 'Image generation', 'Web', 'Google', 'Memory', 'Agent', 'Harness', 'Data'];
 const presets: Record<string, { primary: string; embedding: string; context: number }> = {
   lite: {
-    primary: 'hf.co/LiquidAI/LFM2.5-2.6B-GGUF:Q4_K_M',
+    primary: liteModel,
     embedding: 'qwen3-embedding:0.6b',
     context: 8192,
   },
@@ -88,18 +95,19 @@ export function SettingsView({ station }: { station: Station }) {
   function applyPreset(profile: string) {
     if (!settings) return;
     const preset = presets[profile];
+    const primary = profile === 'lite' ? preferredLiteModel(station.models.models) : preset.primary;
     setSettings({
       ...settings,
       profile,
       context_tokens: preset.context,
       roles: {
         ...settings.roles,
-        primary_chat: preset.primary,
-        planner: preset.primary,
-        router: preset.primary,
-        summarizer: preset.primary,
-        memory_extractor: preset.primary,
-        critic: preset.primary,
+        primary_chat: primary,
+        planner: primary,
+        router: primary,
+        summarizer: primary,
+        memory_extractor: primary,
+        critic: primary,
         vision: profile === 'lite' ? 'qwen3.5:2b' : preset.primary,
         embedding: preset.embedding,
       },
@@ -210,7 +218,13 @@ export function SettingsView({ station }: { station: Station }) {
                       onClick={() => applyPreset(profile)}
                     >
                       <strong>{profile[0].toUpperCase() + profile.slice(1)}</strong>
-                      <span>{modelLabel(preset.primary)}</span>
+                      <span>
+                        {modelLabel(
+                          profile === 'lite'
+                            ? preferredLiteModel(station.models.models)
+                            : preset.primary,
+                        )}
+                      </span>
                       <small>{(preset.context / 1024).toFixed(0)}K context</small>
                     </button>
                   ))}
@@ -222,49 +236,67 @@ export function SettingsView({ station }: { station: Station }) {
               <section className="section">
                 <h2>Role assignments</h2>
                 <div className="form-grid">
-                  {Object.entries(settings.roles).map(([role, assigned]) => (
-                    <label key={role}>
-                      {role.replaceAll('_', ' ')}
-                      <select
-                        value={assigned}
-                        onChange={(event) =>
-                          setSettings({
-                            ...settings,
-                            roles: { ...settings.roles, [role]: event.target.value },
-                          })
-                        }
-                      >
-                        <option value="">Not assigned</option>
-                        {assigned &&
-                        !station.models.models.some((model) => model.name === assigned) ? (
-                          <option value={assigned}>{modelLabel(assigned)} · missing</option>
+                  {Object.entries(settings.roles).map(([role, assigned]) => {
+                    const installed = station.models.models.find(
+                      (model) => model.name === assigned,
+                    );
+                    const compatible = station.models.models.filter((model) =>
+                      acceptsRole(model, role),
+                    );
+                    const setupCommand = modelSetupCommand(assigned);
+                    return (
+                      <label key={role}>
+                        {role.replaceAll('_', ' ')}
+                        <select
+                          value={assigned}
+                          onChange={(event) =>
+                            setSettings({
+                              ...settings,
+                              roles: { ...settings.roles, [role]: event.target.value },
+                            })
+                          }
+                        >
+                          <option value="">Not assigned</option>
+                          {assigned && !installed ? (
+                            <option value={assigned}>{modelLabel(assigned)} · missing</option>
+                          ) : null}
+                          {installed && !acceptsRole(installed, role) ? (
+                            <option value={assigned} disabled>
+                              {modelLabel(assigned)} · incompatible
+                            </option>
+                          ) : null}
+                          {compatible.map((model) => (
+                            <option value={model.name} key={model.name}>
+                              {modelLabel(model.name)}
+                            </option>
+                          ))}
+                        </select>
+                        {assigned && !installed ? (
+                          <div className="pull-command">
+                            <code>{setupCommand}</code>
+                            <button
+                              className="icon-button"
+                              aria-label={`Copy pull command for ${assigned}`}
+                              onClick={() =>
+                                void action(
+                                  () => navigator.clipboard.writeText(setupCommand),
+                                  'Command copied',
+                                )
+                              }
+                            >
+                              <Copy size={13} />
+                            </button>
+                          </div>
                         ) : null}
-                        {station.models.models.map((model) => (
-                          <option value={model.name} key={model.name}>
-                            {modelLabel(model.name)}
-                          </option>
-                        ))}
-                      </select>
-                      {assigned &&
-                      !station.models.models.some((model) => model.name === assigned) ? (
-                        <div className="pull-command">
-                          <code>ollama pull {assigned}</code>
-                          <button
-                            className="icon-button"
-                            aria-label={`Copy pull command for ${assigned}`}
-                            onClick={() =>
-                              void action(
-                                () => navigator.clipboard.writeText(`ollama pull ${assigned}`),
-                                'Command copied',
-                              )
-                            }
-                          >
-                            <Copy size={13} />
-                          </button>
-                        </div>
-                      ) : null}
-                    </label>
-                  ))}
+                        {installed && !acceptsRole(installed, role) ? (
+                          <small>
+                            This model does not advertise {roleCapability(role)} capability. Select
+                            a compatible model.
+                          </small>
+                        ) : null}
+                      </label>
+                    );
+                  })}
                 </div>
               </section>
               <section className="section">

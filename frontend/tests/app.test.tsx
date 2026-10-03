@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { App } from '../src/App';
@@ -96,6 +96,59 @@ function mockApi(custom?: (path: string, init?: RequestInit) => Response | undef
 }
 
 describe('workstation interactions', () => {
+  it('starts compact views with visible chat, opens one drawer at a time, and preserves desktop preferences', async () => {
+    let compact = true;
+    const listeners = new Set<() => void>();
+    vi.stubGlobal('matchMedia', () => ({
+      get matches() {
+        return compact;
+      },
+      addEventListener: (_type: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_type: string, listener: () => void) => listeners.delete(listener),
+    }));
+    localStorage.setItem('pixel-station:v1:left-open', 'true');
+    localStorage.setItem('pixel-station:v1:right-open', 'true');
+    mockApi();
+    const user = userEvent.setup();
+    render(<App />);
+    expect(
+      await screen.findByRole('textbox', { name: 'Message Pixel Station' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('complementary', { name: 'Navigation panel' }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole('complementary', { name: 'Context panel' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Expand sidebar' }));
+    expect(screen.getByRole('navigation', { name: 'Main navigation' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Expand context panel' }));
+    expect(
+      screen.queryByRole('complementary', { name: 'Navigation panel' }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole('complementary', { name: 'Context panel' })).toBeInTheDocument();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('complementary', { name: 'Context panel' })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Expand sidebar' }));
+    await user.click(screen.getByRole('button', { name: 'Memory' }));
+    expect(await screen.findByText('No memories yet')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('complementary', { name: 'Navigation panel' }),
+    ).not.toBeInTheDocument();
+    expect(localStorage.getItem('pixel-station:v1:left-open')).toBe('true');
+    expect(localStorage.getItem('pixel-station:v1:right-open')).toBe('true');
+
+    act(() => {
+      compact = false;
+      listeners.forEach((listener) => listener());
+    });
+    expect(screen.getByRole('complementary', { name: 'Navigation panel' })).toBeInTheDocument();
+    expect(screen.getByRole('complementary', { name: 'Context panel' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Collapse sidebar' }));
+    expect(localStorage.getItem('pixel-station:v1:left-open')).toBe('false');
+    expect(localStorage.getItem('pixel-station:v1:right-open')).toBe('true');
+  });
+
   it('persists independent panel states and navigates to real feature screens', async () => {
     mockApi();
     const user = userEvent.setup();
@@ -186,9 +239,14 @@ describe('workstation interactions', () => {
 
   it('restores an existing image job when reopening the workspace and allows cancellation', async () => {
     localStorage.setItem('pixel-station:v1:image-job', '"previous-job"');
-    const fetcher = mockApi((path) =>
+    const fetcher = mockApi((path, init) =>
       path === '/api/images/jobs/previous-job'
-        ? json({ id: 'previous-job', status: 'running', progress: 0.4, images: [] })
+        ? json({
+            id: 'previous-job',
+            status: init?.method === 'DELETE' ? 'cancelled' : 'running',
+            progress: 0.4,
+            images: [],
+          })
         : undefined,
     );
     const user = userEvent.setup();
@@ -203,6 +261,91 @@ describe('workstation interactions', () => {
         expect.objectContaining({ method: 'DELETE' }),
       ),
     );
+  });
+
+  it('retries remote cancellation after failure and preserves the returned cleanup state', async () => {
+    localStorage.setItem('pixel-station:v1:image-job', '"failed-job"');
+    let retries = 0;
+    mockApi((path, init) => {
+      if (path !== '/api/images/jobs/failed-job') return undefined;
+      if (init?.method === 'DELETE') retries += 1;
+      return json({
+        id: 'failed-job',
+        status: retries > 1 ? 'cancelled' : 'failed',
+        progress: 0,
+        images: [],
+        prompt_id: 'remote-prompt',
+        remote_cleanup_required: retries < 2,
+        error:
+          retries === 1
+            ? 'Remote cleanup failed again.'
+            : retries === 0
+              ? 'ComfyUI disconnected.'
+              : undefined,
+      });
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: 'Image Studio' }));
+    await user.click(await screen.findByRole('button', { name: 'Retry remote cancellation' }));
+    expect(await screen.findByText('Remote cleanup failed again.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry remote cancellation' })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'Retry remote cancellation' }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', { name: 'Retry remote cancellation' }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(retries).toBe(2);
+  });
+
+  it('offers compatible role models, keeps missing selections visible, and applies the installed Lite alias', async () => {
+    const alias = 'pixel-station-lfm2.5:2.6b';
+    mockApi((path) => {
+      if (path === '/api/models')
+        return json({
+          available: true,
+          models: [
+            { name: model, capabilities: ['completion'] },
+            { name: alias, capabilities: ['completion', 'thinking'] },
+            { name: 'qwen3-embedding:0.6b', capabilities: ['embedding'] },
+            { name: 'vision-model', capabilities: ['vision', 'completion'] },
+          ],
+        });
+      if (path === '/api/settings')
+        return json({
+          ...settings,
+          roles: {
+            ...settings.roles,
+            planner: 'qwen3-embedding:0.6b',
+            vision: 'missing-vision:2b',
+          },
+        });
+      return undefined;
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
+    const embedding = await screen.findByRole('combobox', { name: /^embedding/ });
+    expect(
+      within(embedding)
+        .getAllByRole('option')
+        .map((option) => (option as HTMLOptionElement).value),
+    ).toEqual(['', 'qwen3-embedding:0.6b']);
+    const vision = screen.getByRole('combobox', { name: /^vision/ });
+    expect(
+      within(vision)
+        .getAllByRole('option')
+        .map((option) => (option as HTMLOptionElement).value),
+    ).toEqual(['', 'missing-vision:2b', 'vision-model']);
+    expect(screen.getByText('ollama pull missing-vision:2b')).toBeInTheDocument();
+    expect(
+      within(screen.getByRole('combobox', { name: /^planner/ })).getByRole('option', {
+        name: /incompatible/,
+      }),
+    ).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: /^Lite/ }));
+    expect(screen.getByRole('combobox', { name: /^primary chat/ })).toHaveValue(alias);
   });
 
   it('requests only the poker actions the deterministic engine exposes', async () => {

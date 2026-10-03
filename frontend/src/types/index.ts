@@ -117,6 +117,8 @@ export interface ImageJob {
   progress: number;
   images: GeneratedImage[];
   error?: string;
+  remote_cleanup_required?: boolean;
+  prompt_id?: string | null;
 }
 export interface GoogleStatus {
   configured: boolean;

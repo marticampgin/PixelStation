@@ -42,7 +42,7 @@ export function ContextPanel({ station }: { station: Station }) {
   const memories = station.retrievedMemories.length ? station.retrievedMemories : historicMemories;
   if (!station.rightOpen) return null;
   return (
-    <aside className="context-panel" aria-label="Context panel">
+    <aside id="context-panel" className="context-panel" aria-label="Context panel">
       <div className="context-tabs">
         {['Context', 'Tools', 'Memory'].map((name) => (
           <button key={name} onClick={() => setTab(name)} className={name === tab ? 'active' : ''}>

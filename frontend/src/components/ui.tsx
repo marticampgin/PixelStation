@@ -124,6 +124,8 @@ export const formatBytes = (bytes: number) =>
       ? `${(bytes / 1024).toFixed(1)} KB`
       : `${(bytes / 1024 ** 2).toFixed(1)} MB`;
 export const modelLabel = (name: string) =>
-  /LFM2\.5/i.test(name)
-    ? 'LFM2.5 · 2.6B'
-    : name.replace(/^hf\.co\/[^/]+\//, '').replace(/-GGUF:.*$/, '');
+  name === 'pixel-station-lfm2.5:2.6b'
+    ? 'LFM2.5 · 2.6B Lite'
+    : /LFM2\.5.*2\.6B/i.test(name)
+      ? 'LFM2.5 · 2.6B'
+      : name.replace(/^hf\.co\/[^/]+\//, '').replace(/-GGUF:.*$/, '');

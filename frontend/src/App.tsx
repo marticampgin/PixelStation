@@ -1,4 +1,5 @@
-import { Box, PanelRightClose, PanelRightOpen } from 'lucide-react';
+import { Box, Menu, PanelRightClose, PanelRightOpen } from 'lucide-react';
+import { useEffect } from 'react';
 import { ErrorNotice, modelLabel } from './components/ui';
 import { useStation } from './hooks/useStation';
 import { Sidebar } from './layouts/Sidebar';
@@ -26,11 +27,38 @@ const titles = {
 };
 export function App() {
   const station = useStation();
+  const drawerOpen = station.compact && (station.leftOpen || station.rightOpen);
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') station.closeCompactPanels();
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [drawerOpen, station.closeCompactPanels]);
   return (
     <div className="app-shell">
+      {drawerOpen ? (
+        <button
+          className="drawer-backdrop"
+          aria-label="Close panel"
+          onClick={station.closeCompactPanels}
+        />
+      ) : null}
       <Sidebar station={station} />
       <main className="workspace">
         <header className="topbar">
+          {station.compact ? (
+            <button
+              className="icon-button"
+              aria-label={station.leftOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+              aria-expanded={station.leftOpen}
+              aria-controls="navigation-panel"
+              onClick={() => station.setLeftOpen((open) => !open)}
+            >
+              <Menu size={22} />
+            </button>
+          ) : null}
           <h1>
             {station.page === 'chat'
               ? (station.conversation?.title ?? 'New chat')
@@ -47,7 +75,10 @@ export function App() {
                 <option value="">Select model</option>
                 {station.model &&
                 !station.models.models.some((model) => model.name === station.model) ? (
-                  <option value={station.model}>{modelLabel(station.model)} · missing</option>
+                  <option value={station.model}>
+                    {modelLabel(station.model)}
+                    {station.models.available ? ' · missing' : ''}
+                  </option>
                 ) : null}
                 {station.models.models
                   .filter(
@@ -67,6 +98,8 @@ export function App() {
               className="icon-button"
               aria-label={station.rightOpen ? 'Collapse context panel' : 'Expand context panel'}
               title={station.rightOpen ? 'Collapse context panel' : 'Expand context panel'}
+              aria-expanded={station.rightOpen}
+              aria-controls="context-panel"
               onClick={() => station.setRightOpen((value) => !value)}
             >
               {station.rightOpen ? <PanelRightClose size={22} /> : <PanelRightOpen size={22} />}

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { core } from '../api/services';
 import { errorMessage, post, streamChat } from '../api/client';
 import { useLocalStorage } from './useLocalStorage';
+import { usePanelState } from './usePanelState';
 import type {
   Conversation,
   ConversationDetail,
@@ -14,9 +15,9 @@ import type {
 } from '../types';
 
 export function useStation() {
-  const [page, setPage] = useState<Page>('chat');
-  const [leftOpen, setLeftOpen] = useLocalStorage('left-open', true);
-  const [rightOpen, setRightOpen] = useLocalStorage('right-open', true);
+  const [page, setPageState] = useState<Page>('chat');
+  const { compact, leftOpen, setLeftOpen, rightOpen, setRightOpen, closeCompactPanels } =
+    usePanelState();
   const [conversationId, setConversationId] = useLocalStorage<string | null>('conversation', null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [showArchived, setShowArchived] = useState(false);
@@ -38,6 +39,11 @@ export function useStation() {
   const activeId = useRef<string | null>(conversationId);
   const createdId = useRef<string | null>(null);
   const loadSequence = useRef(0);
+
+  function setPage(next: Page) {
+    setPageState(next);
+    closeCompactPanels();
+  }
 
   const refreshConversations = useCallback(async () => {
     const chats = await core.conversations('', showArchived);
@@ -243,6 +249,8 @@ export function useStation() {
   return {
     page,
     setPage,
+    compact,
+    closeCompactPanels,
     leftOpen,
     setLeftOpen,
     rightOpen,

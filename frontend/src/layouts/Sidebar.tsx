@@ -35,8 +35,13 @@ export function Sidebar({ station }: { station: Station }) {
   const chats = station.conversations.filter((chat) =>
     chat.title.toLowerCase().includes(search.toLowerCase()),
   );
+  if (station.compact && !station.leftOpen) return null;
   return (
-    <aside className={`sidebar ${station.leftOpen ? '' : 'collapsed'}`}>
+    <aside
+      id="navigation-panel"
+      aria-label="Navigation panel"
+      className={`sidebar ${station.leftOpen ? '' : 'collapsed'}`}
+    >
       <div className="brand">
         <PixelMark />
         {station.leftOpen ? <span>Pixel Station</span> : null}

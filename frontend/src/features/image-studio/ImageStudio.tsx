@@ -93,6 +93,7 @@ export function ImageStudio({ station }: { station: Station }) {
   const jobId = job?.id;
   const running =
     job && !['complete', 'completed', 'failed', 'cancelled', 'interrupted'].includes(job.status);
+  const cleanupRequired = Boolean(job?.remote_cleanup_required && job.prompt_id);
   useEffect(() => {
     if (!jobId || !running) return;
     let active = true;
@@ -140,6 +141,14 @@ export function ImageStudio({ station }: { station: Station }) {
         height,
       });
       trackJob(next);
+    });
+  }
+  async function cancelJob() {
+    if (!job) return;
+    await action(async () => {
+      const refreshed = await remove<ImageJob>(`/images/jobs/${job.id}`);
+      trackJob(refreshed);
+      if (refreshed.error) setError(refreshed.error);
     });
   }
   async function importWorkflow() {
@@ -320,22 +329,27 @@ export function ImageStudio({ station }: { station: Station }) {
           >
             {busy ? 'Submitting…' : 'Generate image'}
           </button>
-          {running ? (
+          {job && (running || cleanupRequired) ? (
             <div className="generation-progress">
-              <Loading text={`${job.status} · ${Math.round(job.progress * 100)}%`} />
-              <progress value={job.progress} max="1" />
+              {running ? (
+                <>
+                  <Loading text={`${job.status} · ${Math.round(job.progress * 100)}%`} />
+                  <progress value={job.progress} max="1" />
+                </>
+              ) : (
+                <p className="subtle">
+                  Remote generation may still be running. Retry cancellation when ComfyUI is
+                  reachable.
+                </p>
+              )}
               <button
                 className="text-button"
                 type="button"
-                onClick={() =>
-                  void action(async () => {
-                    await remove(`/images/jobs/${job.id}`);
-                    setJob({ ...job, status: 'cancelled' });
-                  })
-                }
+                disabled={busy}
+                onClick={() => void cancelJob()}
               >
                 <X size={14} />
-                Cancel generation
+                {running ? 'Cancel generation' : 'Retry remote cancellation'}
               </button>
             </div>
           ) : null}
