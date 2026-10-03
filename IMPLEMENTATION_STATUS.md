@@ -14,13 +14,16 @@
 - Local friction reports, regression candidates, idle persistent scheduling and consistent backups including nested databases and pending file replacements.
 - Custom dark navy/violet interface, separate desktop panel preferences, compact-screen drawers and real setup/error states for absent providers.
 - Single-command Windows launcher, developer guidance, provider setup documentation, actual UI screenshot and separate hashed CI dependencies.
-- Automated verification: **192 backend tests and 22 frontend tests pass**; Ruff, backend mypy, TypeScript production build and frontend formatting pass.
+- Automated verification: **193 backend tests and 22 frontend tests pass**; Ruff, backend mypy, TypeScript production build and frontend formatting pass. GitHub's Linux CI passed with the universal hashed dependency lock.
 - Live Windows/API/UI verification: native GPU chat, attached-file answers with sources, memory edit/revision/restart, confirmed file edit/original revision, native conversation summary, 1024-dimensional memory/document embeddings, complete legal AI Poker hand without fallback, harness reports and launcher shutdown/restart.
 - Desktop 1536×1024 and compact 390×844 rendered checks; corrected model-control wrapping and overlapping mobile drawers. Optional services display their genuine unconfigured state.
+- Final in-app browser page identity, meaningful DOM, overlay, console and interaction checks passed. Independently toggled desktop panels survive reload; compact navigation closes its drawer and the exposed backdrop dismisses context.
+- Concept/render inspection compared copy, rail/header layout, typography, navy/violet palette, icon treatment, spacing and composer geometry. Intentional additions are functional history/search/archive controls and the installed alias's Lite label; empty Send is disabled. Default 1280×720 was also checked.
+- Successful native summaries persist independently of extraction. Automatic memories require an actual user-message source from their processed batch; unsupported candidates are skipped. Manual memories retain optional provenance.
 
 ## Currently working
 
-- Final GitHub CI verification and evidence/provenance review for automatic memories.
+- None for the initial local core build. Optional integration setup and the later extensions below remain separate work.
 
 ## Blocked on account or system setup
 
