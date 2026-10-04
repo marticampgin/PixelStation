@@ -1,5 +1,5 @@
 import { Mail, RefreshCw, Search, Send } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { errorMessage, post, request } from '../../api/client';
 import { EmptyState, ErrorNotice, Loading } from '../../components/ui';
 import { useResource } from '../../hooks/useResource';
@@ -21,9 +21,19 @@ export function GmailView() {
   const [body, setBody] = useState('');
   const [instructions, setInstructions] = useState('');
   const [busy, setBusy] = useState(false);
+  const [detailBusy, setDetailBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [approval, setApproval] = useState<Approval | null>(null);
+  const detailRequest = useRef<AbortController | null>(null);
+  const working = busy || detailBusy;
+  useEffect(
+    () => () => {
+      detailRequest.current?.abort();
+      detailRequest.current = null;
+    },
+    [],
+  );
   async function action(run: () => Promise<unknown>, success = '') {
     setBusy(true);
     setError('');
@@ -49,19 +59,39 @@ export function GmailView() {
     if (status.data?.connected) void loadThreads();
   }, [status.data?.connected]);
   async function selectThread(item: EmailThread) {
+    detailRequest.current?.abort();
+    const controller = new AbortController();
+    detailRequest.current = controller;
     setThread(item);
+    setMessages([]);
+    setTo('');
+    setInReplyTo(undefined);
+    setSubject('');
     setBody('');
+    setInstructions('');
     setApproval(null);
-    await action(async () => {
+    setDetailBusy(true);
+    setError('');
+    setNotice('');
+    try {
       const result = await request<{ messages: EmailMessage[] }>(
         `/google/gmail/threads/${item.id}`,
+        { signal: controller.signal },
       );
+      if (controller.signal.aborted) return;
       setMessages(result.messages);
       const target = replyTarget(result.messages);
       setTo(target.recipient);
       setInReplyTo(target.messageId);
       setSubject(/^re:/i.test(item.subject) ? item.subject : `Re: ${item.subject}`);
-    });
+    } catch (err) {
+      if (!controller.signal.aborted) setError(errorMessage(err));
+    } finally {
+      if (detailRequest.current === controller) {
+        detailRequest.current = null;
+        setDetailBusy(false);
+      }
+    }
   }
   const payload = () => ({
     to,
@@ -90,7 +120,7 @@ export function GmailView() {
     <div className="feature-page gmail-page">
       <div className="page-heading">
         <h1>Gmail</h1>
-        <button className="button secondary" disabled={busy} onClick={() => void loadThreads()}>
+        <button className="button secondary" disabled={working} onClick={() => void loadThreads()}>
           <RefreshCw size={15} />
           Refresh
         </button>
@@ -117,7 +147,7 @@ export function GmailView() {
             aria-label="Search Gmail"
           />
         </label>
-        <button className="button secondary" disabled={busy} type="submit">
+        <button className="button secondary" disabled={working} type="submit">
           Search
         </button>
       </form>
@@ -127,6 +157,7 @@ export function GmailView() {
             <button
               key={item.id}
               className={`mail-thread ${item.id === thread?.id ? 'selected' : ''}`}
+              disabled={busy}
               onClick={() => void selectThread(item)}
             >
               <strong>{item.subject || '(No subject)'}</strong>
@@ -170,7 +201,7 @@ export function GmailView() {
                 </label>
                 <button
                   className="button secondary"
-                  disabled={busy}
+                  disabled={working}
                   onClick={() =>
                     void action(async () => {
                       const result = await post<{ body: string }>('/google/gmail/reply', {
@@ -203,7 +234,7 @@ export function GmailView() {
                 <div className="row-actions">
                   <button
                     className="button secondary"
-                    disabled={busy || !body.trim() || !to.trim()}
+                    disabled={working || !body.trim() || !to.trim()}
                     onClick={() =>
                       void action(async () => {
                         const result = await post<{ id: string }>(
@@ -218,7 +249,7 @@ export function GmailView() {
                   </button>
                   <button
                     className="button"
-                    disabled={busy || !body.trim() || !to.trim()}
+                    disabled={working || !body.trim() || !to.trim()}
                     onClick={() =>
                       void action(async () => {
                         const result = await post<{ approval: Approval }>(
@@ -241,7 +272,7 @@ export function GmailView() {
           ) : (
             <EmptyState title="Select a thread">Read an email and prepare a reply.</EmptyState>
           )}
-          {busy ? <Loading text="Working with Gmail…" /> : null}
+          {working ? <Loading text="Working with Gmail…" /> : null}
         </div>
       </div>
     </div>

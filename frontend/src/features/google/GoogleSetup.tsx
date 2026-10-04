@@ -11,12 +11,12 @@ export function GoogleSetup({ onConnected }: { onConnected?: () => void }) {
   const file = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [authUrl, setAuthUrl] = useState('');
-  async function action(run: () => Promise<unknown>) {
+  async function action(run: () => Promise<unknown>, refreshStatus = true) {
     setBusy(true);
     resource.setError(null);
     try {
       await run();
-      await resource.refresh();
+      if (refreshStatus) await resource.refresh();
     } catch (err) {
       resource.setError(errorMessage(err));
     } finally {
@@ -38,9 +38,11 @@ export function GoogleSetup({ onConnected }: { onConnected?: () => void }) {
     });
   }
   async function refresh() {
-    await resource.refresh();
-    const status = await loadGoogle();
-    if (status.connected) onConnected?.();
+    await action(async () => {
+      const status = await loadGoogle();
+      resource.setData(status);
+      if (status.connected) onConnected?.();
+    }, false);
   }
   return (
     <div className="google-setup">
@@ -61,7 +63,11 @@ export function GoogleSetup({ onConnected }: { onConnected?: () => void }) {
       )}
       {resource.data?.connected ? (
         <div className="row-actions">
-          <button className="button secondary" onClick={() => void refresh()}>
+          <button
+            className="button secondary"
+            disabled={busy || resource.loading}
+            onClick={() => void refresh()}
+          >
             <RefreshCw size={16} />
             Refresh status
           </button>
@@ -122,7 +128,11 @@ export function GoogleSetup({ onConnected }: { onConnected?: () => void }) {
             >
               Authorize Google
             </button>
-            <button className="button secondary" onClick={() => void refresh()}>
+            <button
+              className="button secondary"
+              disabled={busy || resource.loading}
+              onClick={() => void refresh()}
+            >
               <RefreshCw size={16} />
               Check connection
             </button>
