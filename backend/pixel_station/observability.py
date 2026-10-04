@@ -114,10 +114,12 @@ def run_metrics(
         "repair_count": sum(
             (trace.get("validation") == "unsupported_tool_protocol" and trace.get("retry") == 1)
             or (trace.get("validation") == "research_plan_error" and trace.get("retry") == 0)
+            or (trace.get("validation") == "adaptive_action_error" and trace.get("retry") == 0
+                and trace.get("error_code") != "adaptive_repeated_action")
             for trace in traces
         ),
         "validation_rejections": sum(
-            trace.get("validation") in {"unsupported_tool_protocol", "research_plan_error"}
+            trace.get("validation") in {"unsupported_tool_protocol", "research_plan_error", "adaptive_action_error"}
             for trace in traces
         ),
         "fallback_count": int(retrieval_fallback),
@@ -134,11 +136,11 @@ def run_metrics(
         if direct_tools
         else 0,
         "tool_workflow_count": direct_tools,
-        "tool_step_measurement": "DAG attempts or explicit provider counters"
+        "tool_step_measurement": "Recorded adaptive/DAG attempts or explicit provider counters"
         if tool_attempts or measured_tool_count
         else "not_available_for_direct_workflow"
         if direct_tools
         else "no_tool_workflow",
-        "budget_scope": "max_steps bounds research DAG/search+fetch and selected-source reads; not a universal inference/tool quota",
+        "budget_scope": "max_steps bounds adaptive tasks, research DAG/search+fetch and selected-source reads; not a universal inference/tool quota",
         "provider_calls": observations,
     }

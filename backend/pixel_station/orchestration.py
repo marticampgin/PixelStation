@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class Route(BaseModel):
     intent: Literal[
         "normal_chat",
+        "adaptive_task",
         "web_search",
         "web_research",
         "file_question",
@@ -38,6 +39,17 @@ class Route(BaseModel):
 
 def route_prompt(content: str, attachments: list[str] | None = None) -> Route:
     text = content.lower().strip()
+    if re.match(r"^/(agent|task)\b", text):
+        task = re.sub(r"^(?:(?:/(?:agent|task))\b\s*)+", "", content.strip(), count=1, flags=re.I).strip()
+        dedicated = route_prompt(task, attachments)
+        if dedicated.requires_confirmation or dedicated.intent in {
+            "gmail_draft",
+            "image_generate",
+            "memory_write",
+            "calendar_read",
+        }:
+            return dedicated
+        return Route(intent="adaptive_task", complexity="complex", requires_plan=True)
     tests = [
         (
             r"\b(edit|revise|update|replace)\b.{0,40}\b(file|document|spreadsheet|pdf|docx|xlsx|csv|notes)\b",
@@ -159,6 +171,8 @@ async def classify_ambiguous(app, content: str, route: Route) -> Route:
         "game": [],
     }
     result.tools_needed = tool_map.get(result.intent, [result.intent])
+    if result.intent == "adaptive_task":
+        result.tools_needed = []
     result.requires_confirmation = result.intent in {
         "gmail_send",
         "calendar_create",

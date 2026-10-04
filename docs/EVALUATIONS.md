@@ -34,6 +34,8 @@ Poker strategy counts cover newly instrumented **production decisions with a sel
 
 Scheduled Harness reports compute local passive statistics only. The application's existing independent idle summary/embedding maintenance can still use its assigned local models. Active native evaluation probes are never scheduled.
 
+Passive reports also group repeated failures by their actual recorded route, model, status and allowlisted structured error/tool/stage/validation evidence. Counts and linked run metadata support controlled reproductions and checkable regression candidates. Free-form private error text is never parsed to infer a root cause; old errors without structured signals stay unclassified. Default downloads omit raw examples, while explicit private-content exports retain bounded local evidence for review before sharing. Adaptive retries count only actual bounded repair calls, and repeated actions stop without another repair.
+
 ## Poker judgment and its limits
 
 `poker.py` gives the chooser only allowlisted public table facts, recent public actions, and the acting player's own two hole cards. Opponent pockets, the deck, and future cards are absent. `poker_strategy.py` derives hand/board strength, position, active opponents, stack depth, call cost, pot odds, and bounded raise guidance. Balanced, value-focused, position-aware, selective-pressure, and patient styles add small nudges; evidence and risk limits take priority.

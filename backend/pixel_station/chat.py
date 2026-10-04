@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .adaptive import run_adaptive
 from .context import approximate_tokens, build_context, clip, input_budget
 from .database import (
     AgentRun,
@@ -399,7 +400,7 @@ async def generate_response(
     settings = app.state.settings()
     model = payload.model or settings.roles["primary_chat"]
     route = route_prompt(payload.content, payload.attachment_ids)
-    if payload.web_sources and route.intent != "web_research":
+    if payload.web_sources and route.intent not in {"web_research", "adaptive_task"}:
         route = Route(intent="normal_chat", complexity="tool", tools_needed=["web_fetch"])
     assistant_id = None
     run_id = None
@@ -534,6 +535,18 @@ async def generate_response(
             session.commit()
         if not payload.web_sources:
             route = await classify_ambiguous(app, payload.content, route)
+        if (
+            route.complexity == "complex"
+            and route.intent
+            in {"file_question", "file_summary", "memory_query", "gmail_search", "gmail_read"}
+            and not route.requires_confirmation
+        ):
+            route = Route(
+                intent="adaptive_task",
+                complexity="complex",
+                requires_plan=True,
+                tools_needed=route.tools_needed,
+            )
         traces = [{"route": route.model_dump()}]
         with app.state.database.session() as session:
             run = session.get(AgentRun, run_id)
@@ -592,6 +605,79 @@ async def generate_response(
             and any(word in payload.content.lower() for word in ("email", "mail"))
         ):
             direct_content = "Email deletion is not supported by the current Gmail scopes. Open Gmail to delete the email."
+        elif route.intent == "adaptive_task":
+            yield ndjson(
+                {
+                    "type": "status",
+                    "stage": "adaptive_task",
+                    "detail": "Choosing actions from observed results",
+                }
+            )
+            adaptive_progress_queue: asyncio.Queue[dict] = asyncio.Queue()
+
+            def adaptive_progress(tool, phase, identifier):
+                nonlocal tool_attempts
+                if phase == "running":
+                    tool_attempts += 1
+                adaptive_progress_queue.put_nowait(
+                    {
+                        "type": "status",
+                        "stage": tool,
+                        "detail": f"{tool.replace('_', ' ').capitalize()} · {phase}",
+                        "step_id": identifier,
+                    }
+                )
+
+            adaptive_task = asyncio.create_task(
+                run_adaptive(
+                    app,
+                    payload.content,
+                    active_ids,
+                    cancel_event,
+                    model=model,
+                    on_step=adaptive_progress,
+                    traces=traces,
+                    initial_sources=fetched,
+                    used_steps=len(fetched),
+                )
+            )
+            adaptive_waiter = None
+            try:
+                while not adaptive_task.done() or not adaptive_progress_queue.empty():
+                    adaptive_waiter = asyncio.create_task(adaptive_progress_queue.get())
+                    ready, _ = await asyncio.wait(
+                        {adaptive_task, adaptive_waiter}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if adaptive_waiter in ready:
+                        yield ndjson(adaptive_waiter.result())
+                    else:
+                        adaptive_waiter.cancel()
+                        await asyncio.gather(adaptive_waiter, return_exceptions=True)
+                adaptive_result = adaptive_task.result()
+            finally:
+                for cleanup_task in (adaptive_task, adaptive_waiter):
+                    if cleanup_task is not None and not cleanup_task.done():
+                        cleanup_task.cancel()
+                await asyncio.gather(
+                    adaptive_task,
+                    *([adaptive_waiter] if adaptive_waiter else []),
+                    return_exceptions=True,
+                )
+            traces.append({"tool": "adaptive_task", "result": adaptive_result})
+            evidence = adaptive_result["content"]
+            web_sources = adaptive_result["sources"]
+            if adaptive_result["incomplete_actions"]:
+                labels = {
+                    "web_fetch": "read a web source",
+                    "gmail_read": "read the selected Gmail thread",
+                    "file_retrieve": "read the attached file",
+                    "file_create": "create the requested file",
+                }
+                remaining = ", ".join(
+                    labels.get(tool, tool.replace("_", " "))
+                    for tool in adaptive_result["incomplete_actions"]
+                )
+                direct_content = f"Stopped at the configured {settings.max_steps}-step tool limit. Still needed: {remaining}. The completed tool results are available in this response's trace."
         elif route.intent == "file_edit":
             yield ndjson(
                 {"type": "status", "stage": "file_edit", "detail": "Preparing a file edit proposal"}
@@ -893,7 +979,13 @@ async def generate_response(
     except Exception as exc:
         final_status = "error"
         error_text = str(exc)[:2000]
-        traces.append({"error": error_text})
+        traces.append(
+            {
+                "error": error_text,
+                "error_code": getattr(exc, "code", None),
+                "error_type": type(exc).__name__,
+            }
+        )
         if not result_content:
             result_content = error_text
         with app.state.database.session() as session:
@@ -923,6 +1015,7 @@ async def generate_response(
                             model or None,
                         )
                     if run:
+                        run.model = model or None
                         run.status, run.finished_at = final_status, now()
                         run.latency_ms = int((time.monotonic() - started) * 1000)
                         run.evidence = {
