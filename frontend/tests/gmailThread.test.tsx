@@ -73,8 +73,16 @@ function setup() {
   const reply = deferred();
   const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input);
-    if (path === '/api/google/status')
-      return json({ configured: true, connected: true, message: 'Connected', scopes: [] });
+    if (path === '/api/google/gmail/status')
+      return json({
+        service: 'gmail',
+        configured: true,
+        connected: true,
+        message: 'Connected',
+        scopes: [],
+        account: { label: 'owner@example.com', email: 'owner@example.com' },
+        migration_required: false,
+      });
     if (path.startsWith('/api/google/gmail/threads?')) return json({ threads });
     if (path.startsWith('/api/google/gmail/threads/'))
       return pending.get(path.split('/').at(-1)!)!.promise;

@@ -57,7 +57,9 @@ async def reply(body: ReplyInput, request: Request):
     if not model:
         raise HTTPException(422, "Select a local model in Settings before drafting")
     try:
-        thread = await app.state.integration_services.google.thread(body.thread_id)
+        connection = app.state.integration_services.google.connection("gmail")
+        binding = connection.binding()
+        thread = await app.state.integration_services.google.thread(body.thread_id, connection_binding=binding)
         with app.state.database.session() as session:
             memories = search_memory(session, "communication style email preferences", 3)
         context = json.dumps(thread, ensure_ascii=False)[:30000]
@@ -81,6 +83,7 @@ async def reply(body: ReplyInput, request: Request):
                 ],
                 DraftBody,
             )
+        connection.assert_binding(binding)
         return draft.model_dump()
     except IntegrationError as exc:
         raise HTTPException(exc.status, str(exc)) from exc
@@ -92,12 +95,15 @@ async def google_chat_action(app, route: str, prompt: str) -> dict:
     if not model:
         raise RuntimeError("Choose a local model to interpret the requested Google action")
     services = app.state.integration_services
-    if not services.google.status().get("connected"):
+    service = "gmail" if route.startswith("gmail_") else "calendar"
+    if not services.google.service_status(service).get("connected"):
         raise IntegrationError(
-            "Google is not connected. Import Desktop OAuth credentials and connect Google in Settings.",
+            f"{service.title()} is not connected. Import Desktop OAuth credentials and connect this service in Settings.",
             "google_not_connected",
             503,
         )
+    connection = services.google.connection(service)
+    binding = connection.binding()
     timestamp = datetime.now(ZoneInfo(settings.time_zone))
     system = f"Interpret the user's request into the supplied schema. Current local datetime is {timestamp.isoformat()}, timezone {settings.time_zone}. Do not invent missing recipient, event ID, date, or duration. Event IDs must come from supplied real event evidence. If a required fact is missing return empty strings; validation will request clarification."
     if route in {"gmail_search", "gmail_read"}:
@@ -120,11 +126,11 @@ async def google_chat_action(app, route: str, prompt: str) -> dict:
             raise ValueError(
                 "Searching and reading an email needs at least two tool steps. Increase max steps in Settings."
             )
-        matched = await services.google.threads(arguments.query)
+        matched = await services.google.threads(arguments.query, connection_binding=binding)
         threads = matched.get("threads", [])
         bodies = (
             await asyncio.gather(
-                *(services.google.thread(thread["id"]) for thread in threads[:limit])
+                *(services.google.thread(thread["id"], connection_binding=binding) for thread in threads[:limit])
             )
             if needs_bodies
             else []
@@ -167,6 +173,7 @@ async def google_chat_action(app, route: str, prompt: str) -> dict:
             arguments_calendar.time_min.isoformat(),
             arguments_calendar.time_max.isoformat(),
             arguments_calendar.query,
+            connection_binding=binding,
         )
         return {
             "content": json.dumps(events, ensure_ascii=False),
@@ -182,7 +189,9 @@ async def google_chat_action(app, route: str, prompt: str) -> dict:
                 EmailInput,
             )
         if route == "gmail_send":
+            connection.assert_binding(binding)
             return await services.propose_action(route, email.model_dump())
+        connection.assert_binding(binding)
         result = await services.google.create_draft(**email.model_dump())
         return {
             "content": f"Created Gmail draft {result['id']}. Review it in Gmail before sending.",
@@ -195,10 +204,11 @@ async def google_chat_action(app, route: str, prompt: str) -> dict:
                 [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
                 EventInput,
             )
+        connection.assert_binding(binding)
         return await services.propose_action(route, event.model_dump())
     if route in {"calendar_update", "calendar_delete"}:
         actual = await services.google.events(
-            "primary", timestamp.isoformat(), (timestamp + timedelta(days=90)).isoformat()
+            "primary", timestamp.isoformat(), (timestamp + timedelta(days=90)).isoformat(), connection_binding=binding
         )
         evidence = [
             {
@@ -228,5 +238,6 @@ async def google_chat_action(app, route: str, prompt: str) -> dict:
             raise ValueError(
                 "Requested event could not be matched to a real upcoming event. Select it in Calendar."
             )
+        connection.assert_binding(binding)
         return await services.propose_action(route, selection.model_dump())
     return await services.chat_context(route, prompt)

@@ -89,6 +89,36 @@ function mockApi(custom?: (path: string, init?: RequestInit) => Response | undef
         connected: false,
         message: 'Google is not configured.',
         scopes: [],
+        connections: {
+          gmail: {
+            service: 'gmail',
+            configured: false,
+            connected: false,
+            message: 'Gmail is not configured.',
+            scopes: [],
+            account: null,
+            migration_required: false,
+          },
+          calendar: {
+            service: 'calendar',
+            configured: false,
+            connected: false,
+            message: 'Calendar is not configured.',
+            scopes: [],
+            account: null,
+            migration_required: false,
+          },
+        },
+      });
+    if (path === '/api/google/gmail/status' || path === '/api/google/calendar/status')
+      return json({
+        service: path.includes('/gmail/') ? 'gmail' : 'calendar',
+        configured: false,
+        connected: false,
+        message: 'Desktop credentials required.',
+        scopes: [],
+        account: null,
+        migration_required: false,
       });
     if (path.endsWith('/status'))
       return json({ available: true, endpoint: 'http://127.0.0.1', message: 'Available' });
@@ -692,8 +722,16 @@ describe('workstation interactions', () => {
   it('preserves all-day calendar event boundaries when editing only the title', async () => {
     let submitted: { event: { summary: string; start: unknown; end: unknown } } | undefined;
     mockApi((path, init) => {
-      if (path === '/api/google/status')
-        return json({ configured: true, connected: true, message: 'Connected', scopes: [] });
+      if (path === '/api/google/calendar/status')
+        return json({
+          service: 'calendar',
+          configured: true,
+          connected: true,
+          message: 'Connected',
+          scopes: [],
+          account: null,
+          migration_required: false,
+        });
       if (path === '/api/google/calendar/calendars') return json({ items: [] });
       if (path.startsWith('/api/google/calendar/events?'))
         return json({

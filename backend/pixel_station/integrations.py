@@ -167,16 +167,21 @@ class IntegrationServices:
         elif action in {"calendar_create", "calendar_update", "calendar_delete"}:
             if action != "calendar_delete":
                 self.google.validate_event(payload.get("event", {}))
-            if action != "calendar_create":
-                original = await self.google.event(payload.get("calendar_id", "primary"), payload["event_id"])
-                payload = {**payload, "etag": original.get("etag"), "original": {key: original.get(key) for key in ["summary", "start", "end", "location"]}}
         else:
             raise IntegrationError("Unsupported consequential action.", "invalid_action", 422)
+        connection = self.google.connection("gmail" if action == "gmail_send" else "calendar")
+        binding = connection.binding()
+        if action in {"calendar_update", "calendar_delete"}:
+            original = await self.google.event(payload.get("calendar_id", "primary"), payload["event_id"], connection_binding=binding)
+            payload = {**payload, "etag": original.get("etag"), "original": {key: original.get(key) for key in ["summary", "start", "end", "location"]}}
+        connection.assert_binding(binding)
+        payload = {**payload, "connection_binding": binding}
         return {"approval": self.approvals.propose(action, payload)}
 
     async def confirm(self, id_: str) -> dict[str, Any]:
         action, payload = self.approvals.consume(id_)
         try:
+            self.google.connection("gmail" if action == "gmail_send" else "calendar").assert_binding(payload.get("connection_binding"))
             if action == "gmail_send":
                 result = await self.google.send_email(**payload)
             else:
@@ -287,9 +292,36 @@ def create_integrations_router(services: IntegrationServices) -> APIRouter:
     async def google_status() -> dict[str, Any]:
         return services.google.status()
 
+    @router.get("/api/google/{service}/status")
+    async def google_service_status(service: Literal["gmail", "calendar"]) -> dict[str, Any]:
+        return services.google.service_status(service)
+
     @router.post("/api/google/credentials")
     async def credentials(body: CredentialsInput) -> dict[str, Any]:
         return services.google.import_credentials(body.credentials)
+
+    @router.post("/api/google/{service}/credentials")
+    async def service_credentials(service: Literal["gmail", "calendar"], body: CredentialsInput) -> dict[str, Any]:
+        services.google.import_credentials(body.credentials)
+        return services.google.service_status(service)
+
+    @router.get("/api/google/{service}/authorize")
+    async def service_authorize(service: Literal["gmail", "calendar"], request: Request) -> dict[str, Any]:
+        return services.google.connection(service).authorize(str(request.url_for("google_service_callback", service=service)))
+
+    @router.get("/api/google/{service}/callback", name="google_service_callback")
+    async def service_callback(service: Literal["gmail", "calendar"], state: str = "", code: str = "", error: str = "") -> HTMLResponse:
+        connection = services.google.connection(service)
+        if error:
+            connection.pending.pop(state, None)
+            return HTMLResponse("<meta charset='utf-8'><title>Pixel Station</title><h1>Google access was not granted</h1><p>Return to Pixel Station Settings to reconnect this service.</p>", status_code=400)
+        await connection.complete_authorization(state, code)
+        return HTMLResponse("<meta charset='utf-8'><title>Pixel Station</title><h1>Google service connected</h1><p>You can close this tab and return to Pixel Station.</p>")
+
+    @router.post("/api/google/{service}/disconnect")
+    async def service_disconnect(service: Literal["gmail", "calendar"]) -> dict[str, Any]:
+        services.google.connection(service).disconnect()
+        return services.google.service_status(service)
 
     @router.get("/api/google/authorize")
     async def authorize(request: Request) -> dict[str, Any]:

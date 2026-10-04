@@ -3,12 +3,12 @@ import { useEffect, useRef, useState } from 'react';
 import { errorMessage, post, request } from '../../api/client';
 import { EmptyState, ErrorNotice, Loading } from '../../components/ui';
 import { useResource } from '../../hooks/useResource';
-import type { Approval, EmailMessage, EmailThread, GoogleStatus } from '../../types';
+import type { Approval, EmailMessage, EmailThread, GoogleServiceStatus } from '../../types';
 import { ApprovalCard } from '../google/ApprovalCard';
 import { GoogleSetup } from '../google/GoogleSetup';
 import { replyTarget } from './replyTarget';
 
-const loadStatus = () => request<GoogleStatus>('/google/status');
+const loadStatus = () => request<GoogleServiceStatus>('/google/gmail/status');
 export function GmailView() {
   const status = useResource(loadStatus);
   const [threads, setThreads] = useState<EmailThread[]>([]);
@@ -103,7 +103,7 @@ export function GmailView() {
   if (status.loading)
     return (
       <div className="feature-page">
-        <Loading text="Checking Google connection…" />
+        <Loading text="Checking Gmail connection…" />
       </div>
     );
   if (!status.data?.connected)
@@ -113,13 +113,18 @@ export function GmailView() {
           <h1>Gmail</h1>
         </div>
         <ErrorNotice message={status.error} />
-        <GoogleSetup onConnected={() => void status.refresh()} />
+        <GoogleSetup service="gmail" onConnected={status.setData} />
       </div>
     );
   return (
     <div className="feature-page gmail-page">
       <div className="page-heading">
-        <h1>Gmail</h1>
+        <div>
+          <h1>Gmail</h1>
+          {status.data.account ? (
+            <p>{status.data.account.email || status.data.account.label}</p>
+          ) : null}
+        </div>
         <button className="button secondary" disabled={working} onClick={() => void loadThreads()}>
           <RefreshCw size={15} />
           Refresh

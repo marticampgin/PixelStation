@@ -132,6 +132,17 @@ export interface GoogleStatus {
   connected: boolean;
   message: string;
   scopes: string[];
+  connections: Record<GoogleService, GoogleServiceStatus>;
+}
+export type GoogleService = 'gmail' | 'calendar';
+export interface GoogleServiceStatus {
+  service: GoogleService;
+  configured: boolean;
+  connected: boolean;
+  message: string;
+  scopes: string[];
+  account: { label: string; email?: string; calendar_id?: string } | null;
+  migration_required: boolean;
 }
 export interface EmailThread {
   id: string;

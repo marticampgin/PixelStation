@@ -14,6 +14,22 @@ export function ApprovalCard({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [result, setResult] = useState('');
+  const { connection_binding: rawBinding, ...reviewPayload } = approval.payload;
+  const binding =
+    rawBinding && typeof rawBinding === 'object' ? (rawBinding as Record<string, unknown>) : null;
+  const account =
+    binding?.account && typeof binding.account === 'object'
+      ? (binding.account as Record<string, unknown>)
+      : null;
+  const service = approval.action.startsWith('gmail_') ? 'gmail' : 'calendar';
+  const accountLabel =
+    binding?.service === service &&
+    typeof binding.generation === 'string' &&
+    binding.generation &&
+    typeof account?.label === 'string' &&
+    account.label.trim()
+      ? account.label
+      : null;
   async function act(confirm: boolean) {
     setBusy(true);
     setError('');
@@ -37,7 +53,17 @@ export function ApprovalCard({
       ) : (
         <>
           <p className="subtle">Review this exact action before it is sent to Google.</p>
-          <pre className="code-block">{JSON.stringify(approval.payload, null, 2)}</pre>
+          {accountLabel ? (
+            <p>
+              Account: <strong>{accountLabel}</strong>
+            </p>
+          ) : (
+            <p className="notice">
+              Account not recorded. Reconnect the service and review a new proposal before
+              confirming.
+            </p>
+          )}
+          <pre className="code-block">{JSON.stringify(reviewPayload, null, 2)}</pre>
           <ErrorNotice message={error} />
           <div className="row-actions">
             <button className="button" disabled={busy} onClick={() => void act(true)}>

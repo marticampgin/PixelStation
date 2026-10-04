@@ -34,7 +34,7 @@ A 403 means the request was refused; check JSON in `search.formats` and instance
 
 The supplied settings supplement the default engines with Mwmbl's independent free index. Its smaller index may miss pages or restrictive queries and does not support safe-search filtering. It improves coverage in the observed upstream-outage case without guaranteeing availability. [Mwmbl engine documentation](https://docs.searxng.org/dev/engines/online/mwmbl.html).
 
-Pixel Station limits searches to 20 results, research to four queries and six fetched pages, fetch downloads to 2 MB and total fetch time to 30 seconds. Redirects are revalidated. The resolved public address is pinned for the actual connection; private/reserved/local-network addresses, file URLs, credentials in URLs and nonstandard ports are rejected. HTML text is extracted locally; JavaScript-only pages return an explanation and can be opened in a browser. The current provider does not enable a Playwright fallback.
+Pixel Station limits searches to 20 results and research to a configured combined tool-call budget (six by default), including searches and source fetches. Chat asks the local model for two distinct focused queries, or one when only one step remains; application code constructs the legal search/fetch dependencies. The direct research API accepts up to four queries within the same total budget. Attached-source reads count toward that total. SearXNG can query multiple upstream engines for one application search, so six tool calls do not mean six upstream HTTP requests. Fetch downloads have a 2 MB cap and total fetch time is bounded to 30 seconds. Redirects are revalidated. The resolved public address is pinned for the actual connection; private/reserved/local-network addresses, file URLs, credentials in URLs and nonstandard ports are rejected. HTML text is extracted locally; JavaScript-only pages return an explanation and can be opened in a browser. The current provider does not enable a Playwright fallback.
 
 ## ComfyUI on Windows
 
@@ -103,13 +103,16 @@ An invalid workflow generally indicates a missing checkpoint/custom node or a ca
 Google integration requires your own account configuration and browser consent. Pixel Station does not receive your Google password. For a personal installation:
 
 1. Open [Google Cloud Console](https://console.cloud.google.com/) and create/select a project.
-2. Enable Gmail API and Google Calendar API in the API Library.
-3. Configure Google Auth Platform branding and audience. For a personal Gmail account choose External; while testing, add your account as a test user.
-4. Create an OAuth client with type **Desktop app**, download its JSON credentials, and import the file in Pixel Station Settings → Google.
-5. Choose Connect Google. The system browser opens Google's consent page; log in and grant the displayed scopes.
-6. Return to Pixel Station and refresh connection status after the callback says Google connected.
+2. Enable Gmail API in the API Library. Enable Google Calendar API when you want to connect Calendar; Gmail setup does not require it.
+3. Configure Google Auth Platform branding and audience. For a personal Google account choose External; while testing, add the account you will authorize as a test user. Add the second account when connecting a different Calendar account.
+4. In Data Access, select `gmail.readonly` and `gmail.compose` for Gmail. Leave other Gmail scopes unchecked. Calendar's two scopes below are only needed when connecting Calendar.
+5. Create an OAuth client with type **Desktop app**, download its JSON credentials, and import the file in Pixel Station Settings → Google Desktop client.
+6. Choose Authorize Gmail on the Gmail connection card. The system browser opens Google's account picker and consent page; choose the intended email account and grant the displayed Gmail scopes.
+7. Return to Pixel Station and check Gmail connection status after the callback says Gmail connected. Verify the displayed account identity.
 
-The client supports a loopback callback with OAuth state and PKCE. Pending authorization expires after ten minutes and is single-use. Client credentials are stored under the configured local data directory; refresh/access tokens are stored in the OS credential keyring, using a separate entry per data directory. Token storage fails explicitly if a functioning keyring is unavailable rather than falling back to plaintext files. [Google desktop OAuth](https://developers.google.com/identity/protocols/oauth2/native-app).
+Calendar has its own authorization, token and status. The same Desktop client JSON can serve both connections, while Gmail and Calendar use different Google accounts. Authorize Calendar separately with its intended account when ready; leaving it disconnected does not prevent Gmail use. Imported client credentials alone do not authorize either account.
+
+The client supports a loopback callback with OAuth state and PKCE. Pending authorization expires after ten minutes and is single-use. Client credentials are stored under the configured local data directory; refresh/access tokens are stored in the OS credential keyring, using separate entries per data directory and service. Each authorization requests only that service's scopes. Token storage fails explicitly if a functioning keyring is unavailable rather than falling back to plaintext files. Existing combined connections require service-specific authorization; their token is not silently assigned to both accounts. [Google desktop OAuth](https://developers.google.com/identity/protocols/oauth2/native-app).
 
 Requested scopes:
 
@@ -124,6 +127,8 @@ Full `https://mail.google.com/` access is not requested. The draft provider crea
 
 Email send and calendar create/update/delete return a pending proposal. The frontend shows the exact payload for review. Confirmation atomically consumes that proposal once, with a ten-minute expiry. Retries need a new proposal, preventing a second click or network retry from silently repeating an external action. Calendar update/delete proposals capture the existing event and its ETag; Google receives `If-Match`, so an intervening edit requires fresh review. Event times must carry explicit timezone offsets. The initial event editor supports title, description, location, start and end; invitations/recurrence are outside that editor's current scope. [Calendar event reference](https://developers.google.com/workspace/calendar/api/v3/reference/events).
 
+Proposals also bind the service and its saved account connection. Disconnecting, reconnecting or importing a different Desktop client invalidates older proposals; review a new one for the current account. Ordinary token refresh and app restart preserve valid bindings. Older proposals without an account binding also need fresh review. Draft/event verification and thread-read follow-ups keep their starting connection and stop if it changes.
+
 If Google accepts a Calendar create/update or Gmail draft but the follow-up verification fails, the error retains the operation and returned ID. It asks you to inspect Calendar or Gmail Drafts before proposing the operation again; the confirmation remains consumed. The API exposes `accepted`, `operation` and `returned_id` alongside the actionable message, and Calendar confirmation outcomes preserve those fields locally. A send response without a message ID similarly asks you to inspect Gmail Sent before another send.
 
 An External OAuth app left in **Testing** receives refresh tokens that expire after seven days for Gmail/Calendar scopes. Move a long-lived personal app to **In production** when appropriate for your account and Google's policies. Google can still revoke credentials, and changing a Google password can invalidate Gmail refresh tokens. Pixel Station then asks you to reconnect. [Google refresh-token rules](https://developers.google.com/identity/protocols/oauth2#expiration).
@@ -131,6 +136,8 @@ An External OAuth app left in **Testing** receives refresh tokens that expire af
 Google's verification requirements depend on the selected scopes and distribution. Personal-use exceptions can apply for an owner/small known group; an unverified-app warning or user cap may still appear. Review the console's current requirements before publishing an app for others. A Workspace organization may need administrator approval for these scopes. No public deployment or verification is performed by Pixel Station.
 
 Disconnect removes this installation's local OS-keyring token. To revoke the app's access at Google as well, remove it from your Google Account's third-party connections. Never add credential JSON, tokens, private email, generated artifacts or databases to Git.
+
+If Google reports `403: access_denied` and says the app is in Testing and limited to developer-approved testers, open **Google Auth Platform → Audience → Test users** in the project that created your Desktop client. Add the exact account selected on Google's sign-in screen, save, and start a fresh authorization from Pixel Station. Publishing the app is not necessary to authorize an approved test user. [Google's consent configuration guide](https://developers.google.com/workspace/guides/configure-oauth-consent).
 
 ## Managed file edits
 

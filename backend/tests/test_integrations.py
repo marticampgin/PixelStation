@@ -701,6 +701,7 @@ async def test_google_oauth_state_expires_and_is_single_use(tmp_path: Path) -> N
 
 def test_http_confirmation_requires_true_and_reject_does_not_send(tmp_path: Path) -> None:
     app_services = services(tmp_path)
+    app_services.google = GoogleConnector(tmp_path, credential_loader=lambda: "test-token")
     app = FastAPI()
     app.include_router(create_integrations_router(app_services))
     with TestClient(app) as client:

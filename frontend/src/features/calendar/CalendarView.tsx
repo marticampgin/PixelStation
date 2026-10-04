@@ -3,11 +3,11 @@ import { useEffect, useState } from 'react';
 import { errorMessage, post, remove, request } from '../../api/client';
 import { EmptyState, ErrorNotice, Loading, Modal } from '../../components/ui';
 import { useResource } from '../../hooks/useResource';
-import type { Approval, CalendarEvent, GoogleStatus } from '../../types';
+import type { Approval, CalendarEvent, GoogleServiceStatus } from '../../types';
 import { ApprovalCard } from '../google/ApprovalCard';
 import { GoogleSetup } from '../google/GoogleSetup';
 
-const loadStatus = () => request<GoogleStatus>('/google/status');
+const loadStatus = () => request<GoogleServiceStatus>('/google/calendar/status');
 const localDate = (date: Date) =>
   `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 const localDateTime = (value?: string) =>
@@ -126,7 +126,7 @@ export function CalendarView() {
   if (status.loading)
     return (
       <div className="feature-page">
-        <Loading text="Checking Google connection…" />
+        <Loading text="Checking Calendar connection…" />
       </div>
     );
   if (!status.data?.connected)
@@ -136,7 +136,7 @@ export function CalendarView() {
           <h1>Calendar</h1>
         </div>
         <ErrorNotice message={status.error} />
-        <GoogleSetup onConnected={() => void status.refresh()} />
+        <GoogleSetup service="calendar" onConnected={status.setData} />
       </div>
     );
   return (
@@ -145,6 +145,9 @@ export function CalendarView() {
         <div>
           <h1>Calendar</h1>
           <p>Agenda for the next two weeks.</p>
+          {status.data.account ? (
+            <p>{status.data.account.calendar_id || status.data.account.label}</p>
+          ) : null}
         </div>
         <button className="button" onClick={() => edit(null)}>
           <Plus size={16} />

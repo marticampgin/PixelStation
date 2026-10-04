@@ -45,7 +45,7 @@ def app(tmp_path):
     app.state.set_settings(settings)
     calls = []
 
-    async def threads(query):
+    async def threads(query, **kwargs):
         calls.append(("threads", query))
         return {
             "threads": [
@@ -55,16 +55,17 @@ def app(tmp_path):
             "next_page_token": None,
         }
 
-    async def thread(identity):
+    async def thread(identity, **kwargs):
         calls.append(("thread", identity))
         return {"id": identity, "messages": [{"body": "Actual email body", "from": "Alice"}]}
 
-    async def events(calendar, start, end, query):
+    async def events(calendar, start, end, query, **kwargs):
         calls.append(("events", calendar, start, end, query))
         return {"items": [{"id": "actual-event", "summary": "Dentist"}]}
 
     app.state.integration_services.google = SimpleNamespace(
-        status=lambda: {"connected": True}, threads=threads, thread=thread, events=events
+        service_status=lambda service: {"connected": True}, threads=threads, thread=thread, events=events,
+        connection=lambda service: SimpleNamespace(binding=lambda: {"service": service}, assert_binding=lambda binding: None),
     )
     app.state.test_calls = calls
     return app
@@ -93,7 +94,7 @@ async def test_calendar_honors_requested_local_day_window(app):
 
 
 async def test_google_setup_state_avoids_unnecessary_model_calls(app):
-    app.state.integration_services.google.status = lambda: {"connected": False}
+    app.state.integration_services.google.service_status = lambda service: {"connected": False}
     with pytest.raises(IntegrationError, match="not connected"):
         await google_chat_action(app, "gmail_read", "Read email")
     assert app.state.llm.requests == []

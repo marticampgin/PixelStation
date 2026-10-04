@@ -5,7 +5,7 @@ import { errorMessage, post, request } from '../../api/client';
 import { ConfirmDialog, ErrorNotice, Loading, modelLabel } from '../../components/ui';
 import type { Station } from '../../hooks/useStation';
 import type { IntegrationStatus, Settings } from '../../types';
-import { GoogleSetup } from '../google/GoogleSetup';
+import { GoogleConnections } from '../google/GoogleSetup';
 import { SearxSetup } from '../web/SearxSetup';
 import { HarnessPanel } from './HarnessPanel';
 import {
@@ -340,7 +340,7 @@ export function SettingsView({ station }: { station: Station }) {
           ) : null}
           {tab === 'Google' ? (
             <>
-              <GoogleSetup />
+              <GoogleConnections />
               <div className="section" style={{ marginTop: 30 }}>
                 {textField('time_zone', 'Calendar time zone')}
               </div>

@@ -14,7 +14,7 @@
 - Local friction reports, regression candidates, idle persistent scheduling and consistent backups including nested databases and pending file replacements.
 - Custom dark navy/violet interface, separate desktop panel preferences, compact-screen drawers and real setup/error states for absent providers.
 - Single-command Windows launcher, developer guidance, provider setup documentation, actual UI screenshot and separate hashed CI dependencies.
-- Automated verification: **363 backend tests and 64 frontend tests pass**; Ruff, backend mypy, TypeScript production build and frontend formatting pass. The Windows ComfyUI launcher also passed syntax and native launch checks.
+- Automated verification: **395 backend tests and 96 frontend tests pass**; Ruff, backend mypy, TypeScript production build and frontend formatting pass. The Windows ComfyUI launcher also passed syntax and native launch checks.
 - Live Windows/API/UI verification: native GPU chat, attached-file answers with sources, memory edit/revision/restart, confirmed file edit/original revision, native conversation summary, 1024-dimensional memory/document embeddings, complete legal AI Poker hand without fallback, harness reports and launcher shutdown/restart.
 - Desktop 1536×1024 and compact 390×844 rendered checks; corrected model-control wrapping and overlapping mobile drawers. Optional services display their genuine unconfigured state.
 - Final in-app browser page identity, meaningful DOM, overlay, console and interaction checks passed. Independently toggled desktop panels survive reload; compact navigation closes its drawer and the exposed backdrop dismisses context.
@@ -41,15 +41,18 @@
 
 - Installed official Docker Desktop 4.93.0 after the full Windows Restart completed WSL servicing. Native SearXNG 2026.10.4-44b98e610 runs on loopback with an inspected pinned image digest and a 512 MiB container cap. Real searches, safe source fetches and a four-step research DAG returned official SearXNG sources. Readable extraction now favors article/main content and excludes SVG labels and navigation. Web previews reject stale responses; empty results and reported upstream failures have distinct states. Isolated verification for this increment passed 375 backend and 81 frontend tests plus Ruff, mypy and frontend type/lint/build checks.
 
-## Currently working
+- Simplified research planning for the local model: it chooses bounded distinct queries; application code constructs legal dependencies. Explicit research with attached sources retains that route and shares the total tool budget. A native attached-source request completed two searches and two fetches in four of six allowed calls, with no planning/answer repair and all cited URLs present in returned evidence. An outdated service count from a search snippet remains a factual-quality defect and was recorded in the watchtower; execution success is not a correctness score.
+- Gmail and Calendar have separate scopes, tokens, OAuth states, account identities and connection-bound approvals over one Desktop client. Gmail-only consent succeeded after adding the account as a Cloud test user. Real search, thread/body reading and local reply generation for review passed; the connection survived an app restart. Calendar remains disconnected at the owner's request. Client credentials and tokens remain outside Git.
 
-- Image generation and quality profiles are verified locally. Native model-planned Web research is being checked, including explicit research requests with attached sources. Gmail and Calendar are being separated so each can use a different Google account. Personal Google OAuth remains an owner step.
+## Current verification scope
+
+- Local image profiles, native Web execution and connected Gmail search/read/local reply generation are verified within the documented samples. Search-snippet freshness remains a research quality risk. Saving Gmail drafts and sending messages await a concrete reviewed task; Calendar authorization is deferred by the owner.
 
 ## Blocked on account or system setup
 
 - **Core application:** no installation blocker remains on this machine.
-- **Web research:** no installation blocker remains. Actual Brave/DuckDuckGo/Google CSE rate limits or CAPTCHAs interrupted some searches; Mwmbl returned additional real sources after being enabled. Live search/fetch and provider DAG execution are verified; model planning and answer quality remain under native QA. The 8 GB RAM machine showed memory pressure with Docker and Ollama running together; the container cap does not cap WSL host overhead.
-- **Google:** Cloud project/OAuth credentials, personal login and consent require the owner. Live Gmail/Calendar account operations remain unverified; provider and approval behavior are covered with isolated tests.
+- **Web research:** no installation blocker remains. Actual Brave/DuckDuckGo/Google CSE rate limits or CAPTCHAs interrupted some searches; Mwmbl returned additional real sources after being enabled. Live search/fetch, provider DAG and model-query research execution are verified; one stale-snippet factual defect is retained. The 8 GB RAM machine showed memory pressure with Docker and Ollama running together; the container cap does not cap WSL host overhead.
+- **Google:** Gmail is authorized, with native search/read/local reply generation verified. Saved drafts/sends were not submitted. Calendar's account is currently unavailable and authorization was deferred; its provider and approval behavior remain covered with isolated tests.
 - A vision model is optional and currently unassigned. Scanned-document/OCR fallback may need first-use parsing model downloads.
 
 ## Later

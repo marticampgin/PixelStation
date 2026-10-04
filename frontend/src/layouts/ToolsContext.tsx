@@ -40,11 +40,12 @@ export function ToolsContext({ message, busy }: { message?: Message; busy: boole
       if (results[3].status === 'fulfilled')
         statusRows.push({ name: 'ComfyUI', ...results[3].value });
       if (results[4].status === 'fulfilled')
-        statusRows.push({
-          name: 'Google',
-          message: results[4].value.message,
-          available: results[4].value.connected,
-        });
+        for (const [service, connection] of Object.entries(results[4].value.connections))
+          statusRows.push({
+            name: service === 'gmail' ? 'Gmail' : 'Calendar',
+            message: connection.message,
+            available: connection.connected,
+          });
       setStatuses(statusRows);
       const failed = results.find((result) => result.status === 'rejected');
       if (failed?.status === 'rejected') setError(errorMessage(failed.reason));

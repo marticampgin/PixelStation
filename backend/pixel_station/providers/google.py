@@ -13,28 +13,71 @@ from email.utils import getaddresses
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
+from uuid import uuid4
 
 import httpx
 
 from .web import IntegrationError, ReadableHTML
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.compose",
-          "https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/calendar.calendarlist.readonly"]
+SERVICE_SCOPES = {
+    "gmail": ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.compose"],
+    "calendar": ["https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/calendar.calendarlist.readonly"],
+}
+SCOPES = SERVICE_SCOPES["gmail"] + SERVICE_SCOPES["calendar"]
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
 CALENDAR = "https://www.googleapis.com/calendar/v3"
 
 
-class GoogleConnector:
+class GoogleConnection:
     def __init__(self, data_dir: Path, *, transport: httpx.AsyncBaseTransport | None = None,
-                 credential_loader: Any = None, secret_store: Any = None) -> None:
+                 credential_loader: Any = None, secret_store: Any = None, service: str = "gmail") -> None:
+        if service not in SERVICE_SCOPES:
+            raise ValueError("Unknown Google service")
+        self.service, self.scopes = service, SERVICE_SCOPES[service]
         self.root = data_dir / "connectors" / "google"
         self.root.mkdir(parents=True, exist_ok=True)
         self.credentials_path = self.root / "credentials.json"
-        self.account = hashlib.sha256(str(self.root.resolve()).encode()).hexdigest()[:24]
+        self.legacy_account = hashlib.sha256(str(self.root.resolve()).encode()).hexdigest()[:24]
+        self.account = self.legacy_account + ":" + service
         self.transport, self.credential_loader = transport, credential_loader
         self.secret_store = secret_store
         self.pending: dict[str, tuple[float, Any]] = {}
         self.refresh_lock = asyncio.Lock()
+        self.revision = uuid4().hex
+        self.injected_generation = uuid4().hex
+
+    def _connection(self) -> dict[str, Any] | None:
+        raw = self._secret()
+        if not raw:
+            return None
+        try:
+            value = json.loads(raw)
+            if (value.get("version") != 2 or value.get("service") != self.service
+                    or not isinstance(value.get("generation"), str) or not value["generation"]
+                    or not isinstance(value.get("credentials"), dict)
+                    or not isinstance(value.get("account"), dict) or not value["account"].get("label")):
+                raise ValueError("Invalid connection")
+            return value
+        except (ValueError, AttributeError, KeyError) as exc:
+            raise IntegrationError(f"Reconnect {self.service.title()} to establish its separate account connection.", "google_reconnect", 401) from exc
+
+    def binding(self) -> dict[str, Any]:
+        if self.credential_loader:
+            return {"service": self.service, "generation": self.injected_generation, "account": None}
+        connection = self._connection()
+        if not connection:
+            raise IntegrationError(f"Connect {self.service.title()} in Settings before proposing this action.", "google_not_connected", 401)
+        return {key: connection[key] for key in ("service", "generation", "account")}
+
+    def assert_binding(self, expected: dict[str, Any] | None) -> None:
+        try:
+            current = self.binding()
+        except IntegrationError as exc:
+            if exc.code not in {"google_not_connected", "google_reconnect"}:
+                raise
+            current = None
+        if not expected or current != expected:
+            raise IntegrationError("The Google account connection changed after this proposal. Review and approve a new proposal for the current account.", "approval_connection_changed", 409)
 
     def _keyring(self) -> Any:
         if self.secret_store:
@@ -64,13 +107,17 @@ class GoogleConnector:
     def status(self) -> dict[str, Any]:
         configured = self.credentials_path.is_file()
         try:
-            connected = bool(self.credential_loader or self._secret())
-            message = "Google account connected." if connected else "Import Desktop OAuth credentials, then complete Google authorization in your browser."
+            connection = None if self.credential_loader else self._connection()
+            connected = bool(self.credential_loader or connection)
+            message = f"{self.service.title()} account connected." if connected else f"Import Desktop OAuth credentials, then authorize {self.service.title()} and choose its Google account."
         except IntegrationError as exc:
-            connected, message = False, str(exc)
-        return {"configured": configured, "connected": connected, "message": message, "scopes": SCOPES}
+            connected, connection, message = False, None, str(exc)
+        return {"service": self.service, "configured": configured, "connected": connected, "message": message,
+                "scopes": self.scopes, "account": connection["account"] if connection else None,
+                "migration_required": False}
 
-    def import_credentials(self, credentials: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def validate_credentials(credentials: dict[str, Any]) -> dict[str, Any]:
         installed = credentials.get("installed")
         if not isinstance(installed, dict) or not installed.get("client_id") or not installed.get("client_secret"):
             raise IntegrationError("Import credentials downloaded for a Google OAuth Desktop App client, with an installed section.", "invalid_credentials", 422)
@@ -83,6 +130,10 @@ class GoogleConnector:
         clean = {"installed": {**installed, "auth_uri": "https://accounts.google.com/o/oauth2/auth", "token_uri": "https://oauth2.googleapis.com/token"}}
         if len(json.dumps(clean)) > 20_000:
             raise IntegrationError("OAuth credential file is unexpectedly large.", "invalid_credentials", 422)
+        return clean
+
+    def import_credentials(self, credentials: dict[str, Any]) -> dict[str, Any]:
+        clean = self.validate_credentials(credentials)
         # Replacing a client invalidates this installation's previous connection.
         if self.credentials_path.exists():
             self.disconnect()
@@ -101,12 +152,12 @@ class GoogleConnector:
             raise IntegrationError("Desktop OAuth callback must use a local loopback HTTP URL.", "invalid_redirect", 422)
         try:
             from google_auth_oauthlib.flow import Flow
-            flow = Flow.from_client_config(json.loads(self.credentials_path.read_text(encoding="utf-8")), scopes=SCOPES,
+            flow = Flow.from_client_config(json.loads(self.credentials_path.read_text(encoding="utf-8")), scopes=self.scopes,
                                            redirect_uri=callback_url, autogenerate_code_verifier=True)
-            authorization_url, state = flow.authorization_url(access_type="offline", prompt="consent", include_granted_scopes="true")
+            authorization_url, state = flow.authorization_url(access_type="offline", prompt="select_account consent", include_granted_scopes="false")
         except ImportError as exc:
             raise IntegrationError("Install google-auth-oauthlib to connect Google.", "google_dependencies_missing") from exc
-        self.pending = {key: entry for key, entry in self.pending.items() if entry[0] > time.monotonic()}
+        self.pending.clear()
         self.pending[state] = (time.monotonic() + 600, flow)
         return {"authorization_url": authorization_url, "expires_in": 600}
 
@@ -115,20 +166,47 @@ class GoogleConnector:
         if not entry or entry[0] < time.monotonic() or not code:
             raise IntegrationError("OAuth state is invalid, expired or already used. Start Connect Google again.", "invalid_oauth_state", 422)
         flow = entry[1]
+        revision = self.revision
         try:
             await asyncio.wait_for(asyncio.to_thread(flow.fetch_token, code=code, timeout=30), 35)
             credentials = flow.credentials
             if not credentials.refresh_token:
                 raise IntegrationError("Google did not issue a refresh token. Reconnect and grant offline access.", "refresh_token_missing")
-            self._save_secret(credentials.to_json())
+            granted = credentials.granted_scopes
+            if granted is not None and not set(self.scopes) <= set(granted):
+                raise IntegrationError(f"Grant the requested {self.service.title()} permissions before connecting.", "google_scopes_missing", 403)
+            account = await self._authorized_identity(credentials.token)
+            async with self.refresh_lock:
+                if revision != self.revision:
+                    raise IntegrationError("The connection changed during authorization. Start authorization again.", "invalid_oauth_state", 409)
+                self._save_secret(json.dumps({"version": 2, "service": self.service, "generation": uuid4().hex,
+                                              "credentials": json.loads(credentials.to_json()), "account": account}))
+                self.revision = uuid4().hex
+                self.pending.clear()
         except IntegrationError:
             raise
         except Exception as exc:
             raise IntegrationError("Google authorization failed. Check consent, API access and OAuth client configuration.", "oauth_failed") from exc
         return self.status()
 
+    async def _authorized_identity(self, token: str) -> dict[str, str]:
+        url = GMAIL + "/profile" if self.service == "gmail" else CALENDAR + "/users/me/calendarList/primary"
+        try:
+            async with httpx.AsyncClient(timeout=15, transport=self.transport, trust_env=False) as client:
+                response = await client.get(url, headers={"Authorization": "Bearer " + token})
+                response.raise_for_status()
+                data = response.json()
+            identity = data.get("emailAddress") if self.service == "gmail" else data.get("id")
+            if not isinstance(identity, str) or not identity or len(identity) > 500 or any(c in identity for c in "\r\n"):
+                raise ValueError("Missing service identity")
+            return {"label": identity, "email" if self.service == "gmail" else "calendar_id": identity}
+        except (httpx.HTTPError, ValueError, AttributeError) as exc:
+            raise IntegrationError(f"Authorization succeeded but the {self.service.title()} account could not be verified. Check its API/scopes and authorize again.", "google_identity_unavailable") from exc
+
     def disconnect(self) -> None:
         self.pending.clear()
+        self.revision = uuid4().hex
+        self.injected_generation = uuid4().hex
         try:
             store = self._keyring()
             if store.get_password("PixelStation.Google", self.account):
@@ -138,21 +216,32 @@ class GoogleConnector:
         except Exception as exc:
             raise IntegrationError("Could not remove Google credentials from the OS keyring.", "keyring_unavailable") from exc
 
-    async def _token(self) -> str:
+    async def _token(self, expected: dict[str, Any] | None = None) -> str:
         if self.credential_loader:
+            if expected is not None:
+                self.assert_binding(expected)
             value = self.credential_loader()
-            return await value if hasattr(value, "__await__") else value
+            token = await value if hasattr(value, "__await__") else value
+            if expected is not None:
+                self.assert_binding(expected)
+            return token
         async with self.refresh_lock:
-            raw = self._secret()
-            if not raw:
-                raise IntegrationError("Connect Google in Settings to access Gmail or Calendar.", "google_not_connected", 401)
+            connection = self._connection()
+            if not connection:
+                raise IntegrationError(f"Connect {self.service.title()} in Settings to access this service.", "google_not_connected", 401)
+            if expected is not None:
+                self.assert_binding(expected)
+            revision = self.revision
             try:
                 from google.auth.transport.requests import Request
                 from google.oauth2.credentials import Credentials
-                credentials = Credentials.from_authorized_user_info(json.loads(raw), scopes=SCOPES)
+                credentials = Credentials.from_authorized_user_info(connection["credentials"], scopes=self.scopes)
                 if not credentials.valid:
                     await asyncio.wait_for(asyncio.to_thread(credentials.refresh, Request()), 35)
-                    self._save_secret(credentials.to_json())
+                    if revision != self.revision or self.binding()["generation"] != connection["generation"]:
+                        raise IntegrationError("The Google account connection changed during token refresh. Retry with its current account.", "approval_connection_changed", 409)
+                    connection["credentials"] = json.loads(credentials.to_json())
+                    self._save_secret(json.dumps(connection))
                 return credentials.token
             except IntegrationError:
                 raise
@@ -160,15 +249,20 @@ class GoogleConnector:
                 raise IntegrationError("Google authorization expired or was revoked. Reconnect in Settings.", "google_reconnect", 401) from exc
 
     async def request(self, method: str, url: str, *, params: dict[str, Any] | None = None,
-                      body: dict[str, Any] | None = None, etag: str | None = None) -> dict[str, Any]:
+                      body: dict[str, Any] | None = None, etag: str | None = None,
+                      connection_binding: dict[str, Any] | None = None) -> dict[str, Any]:
+        allowed = GMAIL if self.service == "gmail" else CALENDAR
+        if not url.startswith(allowed + "/"):
+            raise IntegrationError("This connection cannot access the other Google service.", "google_service_mismatch", 422)
         try:
-            return await asyncio.wait_for(self._request(method, url, params=params, body=body, etag=etag), timeout=60)
+            return await asyncio.wait_for(self._request(method, url, params=params, body=body, etag=etag, connection_binding=connection_binding), timeout=60)
         except TimeoutError as exc:
             raise IntegrationError("Google request exceeded its 60-second total limit. A mutation may have completed; check Google before proposing it again.", "google_timeout") from exc
 
     async def _request(self, method: str, url: str, *, params: dict[str, Any] | None = None,
-                       body: dict[str, Any] | None = None, etag: str | None = None) -> dict[str, Any]:
-        token = await self._token()
+                       body: dict[str, Any] | None = None, etag: str | None = None,
+                       connection_binding: dict[str, Any] | None = None) -> dict[str, Any]:
+        token = await self._token(connection_binding)
         headers = {"Authorization": "Bearer " + token}
         if etag:
             headers["If-Match"] = etag
@@ -196,17 +290,18 @@ class GoogleConnector:
         except (httpx.HTTPError, ValueError) as exc:
             raise IntegrationError("Google API request failed. Check connectivity and account permissions.", "google_api_failed") from exc
 
-    async def threads(self, query: str = "", page_token: str = "") -> dict[str, Any]:
+    async def threads(self, query: str = "", page_token: str = "", *, connection_binding: dict[str, Any] | None = None) -> dict[str, Any]:
+        binding = connection_binding or self.binding()
         params = {"maxResults": 20, "q": query[:2000]}
         if page_token:
             params["pageToken"] = page_token
-        result = await self.request("GET", GMAIL + "/threads", params=params)
+        result = await self.request("GET", GMAIL + "/threads", params=params, connection_binding=binding)
         ids = [item["id"] for item in result.get("threads", [])]
         semaphore = asyncio.Semaphore(4)
 
         async def load(id_: str) -> dict[str, Any]:
             async with semaphore:
-                thread = await self.thread(id_)
+                thread = await self.thread(id_, connection_binding=binding)
                 last = thread["messages"][-1] if thread["messages"] else {}
                 return {"id": id_, "subject": last.get("subject", ""), "from": last.get("from", ""), "date": last.get("date", ""), "snippet": thread.get("snippet", "")}
 
@@ -248,8 +343,8 @@ class GoogleConnector:
                 "label_ids": message.get("labelIds", []),
                 "message_id": headers.get("message-id", ""), "attachments": attachments}
 
-    async def thread(self, id_: str) -> dict[str, Any]:
-        result = await self.request("GET", GMAIL + "/threads/" + quote(id_, safe=""), params={"format": "full"})
+    async def thread(self, id_: str, *, connection_binding: dict[str, Any] | None = None) -> dict[str, Any]:
+        result = await self.request("GET", GMAIL + "/threads/" + quote(id_, safe=""), params={"format": "full"}, connection_binding=connection_binding)
         return {"id": result.get("id", id_), "snippet": result.get("messages", [{}])[-1].get("snippet", "") if result.get("messages") else "",
                 "messages": [self._message(message) for message in result.get("messages", [])]}
 
@@ -271,20 +366,21 @@ class GoogleConnector:
         return payload
 
     async def create_draft(self, **email: Any) -> dict[str, Any]:
-        result = await self.request("POST", GMAIL + "/drafts", body={"message": self.email_payload(**email)})
+        binding = self.binding()
+        result = await self.request("POST", GMAIL + "/drafts", body={"message": self.email_payload(**email)}, connection_binding=binding)
         if not result.get("id"):
             raise self._accepted_unverified("gmail_draft", None)
         # Reopen the actual artifact to validate creation.
         try:
-            verified = await self.request("GET", GMAIL + "/drafts/" + quote(result["id"], safe=""), params={"format": "minimal"})
+            verified = await self.request("GET", GMAIL + "/drafts/" + quote(result["id"], safe=""), params={"format": "minimal"}, connection_binding=binding)
         except IntegrationError as exc:
             raise self._accepted_unverified("gmail_draft", result["id"], exc) from exc
         if verified.get("id") != result["id"]:
             raise self._accepted_unverified("gmail_draft", result["id"])
         return result
 
-    async def send_email(self, **email: Any) -> dict[str, Any]:
-        result = await self.request("POST", GMAIL + "/messages/send", body=self.email_payload(**email))
+    async def send_email(self, *, connection_binding: dict[str, Any] | None = None, **email: Any) -> dict[str, Any]:
+        result = await self.request("POST", GMAIL + "/messages/send", body=self.email_payload(**email), connection_binding=connection_binding)
         if not result.get("id"):
             raise self._accepted_unverified("gmail_send", None)
         return result
@@ -306,7 +402,7 @@ class GoogleConnector:
     async def calendars(self) -> dict[str, Any]:
         return await self.request("GET", CALENDAR + "/users/me/calendarList", params={"maxResults": 100})
 
-    async def events(self, calendar_id: str, time_min: str, time_max: str, query: str = "") -> dict[str, Any]:
+    async def events(self, calendar_id: str, time_min: str, time_max: str, query: str = "", *, connection_binding: dict[str, Any] | None = None) -> dict[str, Any]:
         for value in [time_min, time_max]:
             try:
                 parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -317,10 +413,10 @@ class GoogleConnector:
         if datetime.fromisoformat(time_min.replace("Z", "+00:00")) >= datetime.fromisoformat(time_max.replace("Z", "+00:00")):
             raise IntegrationError("Calendar range end must follow its start.", "invalid_range", 422)
         return await self.request("GET", CALENDAR + "/calendars/" + quote(calendar_id, safe="") + "/events",
-                                  params={"timeMin": time_min, "timeMax": time_max, "singleEvents": "true", "orderBy": "startTime", "maxResults": 100, "q": query[:2000]})
+                                  params={"timeMin": time_min, "timeMax": time_max, "singleEvents": "true", "orderBy": "startTime", "maxResults": 100, "q": query[:2000]}, connection_binding=connection_binding)
 
-    async def event(self, calendar_id: str, event_id: str) -> dict[str, Any]:
-        return await self.request("GET", CALENDAR + "/calendars/" + quote(calendar_id, safe="") + "/events/" + quote(event_id, safe=""))
+    async def event(self, calendar_id: str, event_id: str, *, connection_binding: dict[str, Any] | None = None) -> dict[str, Any]:
+        return await self.request("GET", CALENDAR + "/calendars/" + quote(calendar_id, safe="") + "/events/" + quote(event_id, safe=""), connection_binding=connection_binding)
 
     @staticmethod
     def validate_event(event: dict[str, Any]) -> dict[str, Any]:
@@ -349,19 +445,121 @@ class GoogleConnector:
         return event
 
     async def mutate_event(self, action: str, calendar_id: str, event: dict[str, Any] | None = None,
-                           event_id: str | None = None, etag: str | None = None, **_: Any) -> dict[str, Any]:
+                           event_id: str | None = None, etag: str | None = None,
+                           connection_binding: dict[str, Any] | None = None, **_: Any) -> dict[str, Any]:
+        connection_binding = connection_binding or self.binding()
         url = CALENDAR + "/calendars/" + quote(calendar_id, safe="") + "/events"
         if event_id:
             url += "/" + quote(event_id, safe="")
         method = {"calendar_create": "POST", "calendar_update": "PATCH", "calendar_delete": "DELETE"}[action]
-        result = await self.request(method, url, body=self.validate_event(event) if event else None, etag=etag)
+        result = await self.request(method, url, body=self.validate_event(event) if event else None, etag=etag, connection_binding=connection_binding)
         if action != "calendar_delete":
             if not result.get("id"):
                 raise self._accepted_unverified(action, None)
             try:
-                verified = await self.event(calendar_id, result["id"])
+                verified = await self.event(calendar_id, result["id"], connection_binding=connection_binding)
             except IntegrationError as exc:
                 raise self._accepted_unverified(action, result["id"], exc) from exc
             if verified.get("id") != result["id"]:
                 raise self._accepted_unverified(action, result["id"])
         return result
+
+
+class GoogleConnector:
+    """Independent service connections over one Desktop OAuth client configuration.
+
+    The previous combined token remains isolated in its old keyring slot. It is
+    never copied to either service; explicit authorization establishes identity.
+    Legacy authorize/callback aliases target Gmail only, never both services.
+    """
+
+    email_payload = staticmethod(GoogleConnection.email_payload)
+    validate_event = staticmethod(GoogleConnection.validate_event)
+    _message = staticmethod(GoogleConnection._message)
+
+    def __init__(self, data_dir: Path, *, transport: httpx.AsyncBaseTransport | None = None,
+                 credential_loader: Any = None, secret_store: Any = None) -> None:
+        def loader(service):
+            return credential_loader.get(service) if isinstance(credential_loader, dict) else credential_loader
+        self.gmail = GoogleConnection(data_dir, service="gmail", transport=transport,
+                                      credential_loader=loader("gmail"), secret_store=secret_store)
+        self.calendar = GoogleConnection(data_dir, service="calendar", transport=transport,
+                                         credential_loader=loader("calendar"), secret_store=secret_store)
+        self.root, self.credentials_path = self.gmail.root, self.gmail.credentials_path
+        self.pending = self.gmail.pending
+
+    def connection(self, service: str) -> GoogleConnection:
+        if service not in SERVICE_SCOPES:
+            raise IntegrationError("Choose Gmail or Calendar for this connection.", "invalid_google_service", 422)
+        return self.gmail if service == "gmail" else self.calendar
+
+    def service_status(self, service: str) -> dict[str, Any]:
+        connection = self.connection(service)
+        status = connection.status()
+        if not status["connected"]:
+            try:
+                legacy = bool(connection._keyring().get_password("PixelStation.Google", connection.legacy_account))
+            except Exception:
+                legacy = False
+            if legacy:
+                status["migration_required"] = True
+                status["message"] = f"The previous combined Google connection must be authorized separately for {service.title()}. Its token has not been reused. Choose the account for this service."
+        return status
+
+    def status(self) -> dict[str, Any]:
+        connections = {service: self.service_status(service) for service in SERVICE_SCOPES}
+        return {"configured": self.credentials_path.is_file(),
+                "connected": any(item["connected"] for item in connections.values()),
+                "message": "Gmail and Calendar have independent account connections.",
+                "scopes": self.gmail.scopes, "connections": connections,
+                "migration_required": any(item["migration_required"] for item in connections.values())}
+
+    def import_credentials(self, credentials: dict[str, Any]) -> dict[str, Any]:
+        clean = GoogleConnection.validate_credentials(credentials)
+        try:
+            unchanged = self.credentials_path.is_file() and json.loads(self.credentials_path.read_text(encoding="utf-8")) == clean
+        except ValueError:
+            unchanged = False
+        if not unchanged:
+            # A different client invalidates both service tokens and in-flight flows.
+            self.gmail.disconnect()
+            self.calendar.disconnect()
+            self.gmail.import_credentials(clean)
+        return self.status()
+
+    def authorize(self, callback_url: str) -> dict[str, Any]:
+        return self.gmail.authorize(callback_url)
+
+    async def complete_authorization(self, state: str, code: str) -> dict[str, Any]:
+        return await self.gmail.complete_authorization(state, code)
+
+    def disconnect(self) -> None:
+        self.gmail.disconnect()
+        self.calendar.disconnect()
+        store = self.gmail._keyring()
+        if store.get_password("PixelStation.Google", self.gmail.legacy_account):
+            store.delete_password("PixelStation.Google", self.gmail.legacy_account)
+
+    async def threads(self, query: str = "", page_token: str = "", **kwargs: Any) -> dict[str, Any]:
+        return await self.gmail.threads(query, page_token, **kwargs)
+
+    async def thread(self, id_: str, **kwargs: Any) -> dict[str, Any]:
+        return await self.gmail.thread(id_, **kwargs)
+
+    async def create_draft(self, **email: Any) -> dict[str, Any]:
+        return await self.gmail.create_draft(**email)
+
+    async def send_email(self, **email: Any) -> dict[str, Any]:
+        return await self.gmail.send_email(**email)
+
+    async def calendars(self) -> dict[str, Any]:
+        return await self.calendar.calendars()
+
+    async def events(self, calendar_id: str, time_min: str, time_max: str, query: str = "", **kwargs: Any) -> dict[str, Any]:
+        return await self.calendar.events(calendar_id, time_min, time_max, query, **kwargs)
+
+    async def event(self, calendar_id: str, event_id: str, **kwargs: Any) -> dict[str, Any]:
+        return await self.calendar.event(calendar_id, event_id, **kwargs)
+
+    async def mutate_event(self, action: str, calendar_id: str, **kwargs: Any) -> dict[str, Any]:
+        return await self.calendar.mutate_event(action, calendar_id, **kwargs)
