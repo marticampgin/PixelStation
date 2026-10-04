@@ -23,7 +23,9 @@ class ModelFixture:
 
 
 @pytest.mark.parametrize("create_artifact", [False, True])
-async def test_final_answer_retains_late_read_and_artifact_after_large_search(tmp_path, create_artifact):
+async def test_final_answer_retains_late_read_and_artifact_after_large_search(
+    tmp_path, create_artifact
+):
     fact = "The observed fixture release is version 487."
     artifact_name = "observed-release-487.md"
     expected = artifact_name if create_artifact else fact
@@ -32,10 +34,12 @@ async def test_final_answer_retains_late_read_and_artifact_after_large_search(tm
         {"tool": "web_fetch", "args": {"url": "https://fixture.example/actual"}},
     ]
     if create_artifact:
-        actions.append({
-            "tool": "file_create",
-            "args": {"filename": artifact_name, "format": "md", "content": fact},
-        })
+        actions.append(
+            {
+                "tool": "file_create",
+                "args": {"filename": artifact_name, "format": "md", "content": fact},
+            }
+        )
     actions.append({"tool": "finish", "args": {}})
 
     class AnswerFixture(ModelFixture):
@@ -70,9 +74,7 @@ async def test_final_answer_retains_late_read_and_artifact_after_large_search(tm
         request += ", then create a Markdown file with the observed release"
     events = [
         json.loads(value)
-        async for value in generate_response(
-            app, conversation["id"], MessageInput(content=request)
-        )
+        async for value in generate_response(app, conversation["id"], MessageInput(content=request))
     ]
     message = events[-1]["message"]
     assert message["status"] == "complete" and message["content"] == expected
@@ -249,6 +251,64 @@ async def test_budget_exhaustion_keeps_incomplete_task_honest_without_model_comp
         trace["result"] for trace in message["traces"] if trace.get("tool") == "adaptive_task"
     )
     assert result["stop_reason"] == "tool_budget" and result["incomplete_actions"] == ["web_fetch"]
+    assert message["status"] == "interrupted"
+    if app.state.background_tasks:
+        await asyncio.gather(*app.state.background_tasks)
+    app.state.database.engine.dispose()
+
+
+@pytest.mark.parametrize("create_artifact", [False, True])
+async def test_repeated_fetch_keeps_evidence_and_reports_stopped_task(tmp_path, create_artifact):
+    actions = [
+        {"tool": "web_search", "args": {"query": "fixture"}},
+        {"tool": "web_fetch", "args": {"url": "https://fixture.example/actual"}},
+        {"tool": "web_fetch", "args": {"url": "https://fixture.example/actual"}},
+    ]
+    app = create_app(tmp_path, llm=ModelFixture(actions), discover=False)
+    settings = app.state.settings()
+    settings.roles["primary_chat"] = "fixture:model"
+    app.state.set_settings(settings)
+    calls = []
+
+    async def search(query):
+        calls.append("search")
+        return [{"url": "https://fixture.example/actual", "title": "Actual"}]
+
+    async def fetch(url):
+        calls.append("fetch")
+        return {"url": url, "text": "An actually fetched fact"}
+
+    app.state.tool_registry.tools["web_search"].execute = search
+    app.state.tool_registry.tools["web_fetch"].execute = fetch
+    with app.state.database.session() as session:
+        from pixel_station.chat import ConversationCreate, new_conversation
+
+        conversation = new_conversation(ConversationCreate(), session)
+    prompt = "/task Search web then read one page"
+    if create_artifact:
+        prompt += " and create a Markdown file"
+    events = [
+        json.loads(value)
+        async for value in generate_response(app, conversation["id"], MessageInput(content=prompt))
+    ]
+    message = events[-1]["message"]
+    assert calls == ["search", "fetch"]
+    assert message["status"] == "interrupted"
+    if create_artifact:
+        assert "Still needed: create the requested file" in message["content"]
+        assert "Observed" not in message["content"]
+    else:
+        assert "Observed" in message["content"]
+        assert "task completion has not been verified" in message["content"]
+    result = next(
+        trace["result"] for trace in message["traces"] if trace.get("tool") == "adaptive_task"
+    )
+    assert "An actually fetched fact" in result["content"]
+    assert result["stop_reason"] == "repeated_action"
+    with app.state.database.session() as session:
+        run = session.scalar(select(AgentRun))
+        assert run.status == "interrupted"
+        assert run.evidence["metrics"]["validation_rejections"] == 1
     if app.state.background_tasks:
         await asyncio.gather(*app.state.background_tasks)
     app.state.database.engine.dispose()

@@ -46,7 +46,7 @@ A production decision has a whole-decision budget of **up to 15 seconds**, inclu
 
 ## Repeatable critical gates
 
-The public fixtures are `backend/pixel_station/fixtures/evaluations_v1.json` and `backend/pixel_station/fixtures/poker_evaluations_v1.json`. Every run includes **16 deterministic gates**: the ten core gates below and six Poker context/risk scenarios. Reports store fixture versions and SHA-256 identities, runner/policy versions, safe configuration, package/runtime versions, statuses, measurements, and timing. Gates use isolated synthetic inputs and temporary databases/directories; they do not write production conversations, memories, files, or Poker sessions.
+The public fixtures are `backend/pixel_station/fixtures/evaluations_v1.json` and `backend/pixel_station/fixtures/poker_evaluations_v1.json`. Every run includes **19 deterministic gates**: the thirteen core gates below and six Poker context/risk scenarios. Reports store fixture versions and SHA-256 identities, runner/policy versions, safe configuration, package/runtime versions, statuses, measurements, and timing. Gates use isolated synthetic inputs and temporary databases/directories; they do not write production conversations, memories, files, or Poker sessions.
 
 1. Deterministic routing, including plural Gmail search and unsupported deletion handling.
 2. Latest-request preservation under bounded context allocation.
@@ -58,6 +58,9 @@ The public fixtures are `backend/pixel_station/fixtures/evaluations_v1.json` and
 8. Production Gmail MIME encoding of Unicode body/subject, selected-thread reply headers, attachment bytes/name/hash and header-injection rejection.
 9. Markdown citation URLs restricted to actual retrieved evidence, including query-string identity. This does not measure whether a citation supports each factual claim or is fresh.
 10. Research fetch URLs derived from actual search observations and empty-search dependent fetches skipped. This tests the existing research controller, not arbitrary native adaptive judgment.
+11. Exact numeric date quotations preserve complete ranges and surrounding qualifiers in a date-only request, including signature evidence beyond ordinary top-ranked retrieval.
+12. Adaptive repeated-action recovery preserves gathered evidence, discloses the stop and records an interrupted outcome.
+13. Calendar structured date-window and event-payload validation: explicit offsets, exclusive all-day ends, valid ranges and bounded windows. This does not test arbitrary natural-language date interpretation or live account authorization.
 
 The six Poker scenarios are 72 offsuit facing a deep-stack open, J2 offsuit facing a deep-stack re-raise, deep-stack pocket aces in an unopened pot, short-stack pocket kings facing an open, a river nut straight, and river unpaired 72 facing a meaningful bet. Their deterministic gates check expected evidence, bounded 128-sample estimates, hidden-card isolation, unchanged inputs, chip conservation, admissible legal actions, and rejection of a legal but fixture-inappropriate action. Premium/value cases prevent an always-fold policy from passing. The fixed criteria permit multiple reasonable actions where appropriate; they do not define optimal EV.
 
@@ -72,7 +75,7 @@ Selecting both permits up to **180 seconds of local inference across the sequent
 
 Only one evaluation can run at a time. Persistent RUNNING/COMPLETE/ERROR/INTERRUPTED states survive navigation; interrupted jobs are identified on restart. The UI disables duplicate starts and polls the recorded job. Chat probe output is stored locally, excluding discarded reasoning, and omitted from default UI responses and diagnostics. Poker stores bounded coded decisions and numeric evidence instead of a reasoning narrative.
 
-The comparison baseline is the previous matching run among the latest **30 completed evaluations**, with the **same runner version, fixture identity, configuration, package versions, and both native opt-in flags**. Passive reports do not consume this lookback. **Runner version 5** includes the Poker fixture/policy identity and SHA-256 hashes of `poker.py` and `poker_strategy.py`, so decision-prompt, validation, or context-policy edits create a new comparison group even if the fixture is unchanged. Older runner reports remain preserved but cannot match runner 5. Native comparisons additionally require a known identical model digest and Ollama runtime identity from fresh local `/api/tags` and `/api/version` responses; unknown identity disables matching, and a mutable alias alone is insufficient. A prior PASS becoming FAIL/ERROR is a critical regression. Latency deltas from one comparison have no statistical significance. A model artifact, runtime, package, configuration, or policy change must not be treated as a matched baseline.
+The comparison baseline is the previous matching run among the latest **30 completed evaluations**, with the **same runner version, fixture identity, configuration, package versions, and both native opt-in flags**. Passive reports do not consume this lookback. **Runner version 6** includes both fixture identities, the Poker policy version and source hashes for the tested Poker, answer, adaptive and Calendar paths. Policy edits therefore create a new comparison group even if fixtures are unchanged. Older reports remain preserved but cannot match runner 6. Native comparisons additionally require a known identical model digest and Ollama runtime identity from fresh local `/api/tags` and `/api/version` responses; unknown identity disables matching, and a mutable alias alone is insufficient. A prior PASS becoming FAIL/ERROR is a critical regression. Latency deltas from one comparison have no statistical significance. A model artifact, runtime, package, configuration, or policy change must not be treated as a matched baseline.
 
 ## Privacy and diagnostics
 
@@ -82,7 +85,7 @@ The explicit **Include bounded private local details** checkbox adds existing pr
 
 ## Using evidence to adjust defaults
 
-Record the model, input fixtures, policy/source identity, native version, configuration, and cold/warm state. Collect repeated native gate results and route-specific latency samples before drawing conclusions. Change one limit at a time, compare failures and constraint adherence as well as latency, and preserve both configurations' diagnostic bundles. Add a versioned task-specific gate when a reproducible failure matters; the 16 deterministic gates alone cannot establish model judgment, optimal Poker strategy, or an optimal retrieval/research budget. There is no universal heuristic grade or automatic claim that six/four are best.
+Record the model, input fixtures, policy/source identity, native version, configuration, and cold/warm state. Collect repeated native gate results and route-specific latency samples before drawing conclusions. Change one limit at a time, compare failures and constraint adherence as well as latency, and preserve both configurations' diagnostic bundles. Add a versioned task-specific gate when a reproducible failure matters; the 19 deterministic gates alone cannot establish model judgment, optimal Poker strategy, or an optimal retrieval/research budget. There is no universal heuristic grade or automatic claim that six/four are best.
 
 ## API
 

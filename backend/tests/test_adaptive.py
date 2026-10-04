@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -124,13 +125,13 @@ async def test_task_budget_stops_without_requesting_more_decisions_or_claiming_f
     assert json.loads(result["content"])["stop_reason"] == "tool_budget"
 
 
-async def test_identical_query_loop_is_rejected_after_one_execution():
+async def test_identical_query_loop_stops_after_one_execution_and_retains_evidence():
     actions = [{"tool": "web_search", "args": {"query": query}} for query in [" source ", "SOURCE"]]
     app, requests, calls = make_app(actions, web_tools())
     traces = []
-    with pytest.raises(AdaptiveError) as error:
-        await run_adaptive(app, "Search the web", [], asyncio.Event(), traces=traces)
-    assert error.value.code == "adaptive_repeated_action"
+    result = await run_adaptive(app, "Search the web", [], asyncio.Event(), traces=traces)
+    assert result["stop_reason"] == "repeated_action"
+    assert "Actual fixture observation" in result["content"]
     assert len(calls) == 1 and len(requests) == 2
     assert traces[-1]["validation"] == "adaptive_action_error"
     assert traces[-1]["error_code"] == "adaptive_repeated_action"
@@ -506,3 +507,50 @@ def test_action_context_keeps_latest_task_and_completed_observations_in_one_user
     assert (
         sum(len(message["content"]) for message in messages) <= adaptive.input_budget(settings) * 4
     )
+
+
+async def test_selected_source_read_time_is_inside_whole_adaptive_deadline():
+    app, requests, calls = make_app([], web_tools())
+    with pytest.raises(AdaptiveError) as error:
+        await run_adaptive(
+            app,
+            "Read a web page",
+            [],
+            asyncio.Event(),
+            initial_sources=[{"url": "https://fixture.example/observed", "text": "Already read"}],
+            used_steps=1,
+            deadline=time.monotonic() - 1,
+        )
+    assert error.value.code == "adaptive_timeout"
+    assert not requests and not calls
+
+
+@pytest.mark.parametrize(
+    "chosen_url",
+    [
+        "https://fixture.example/observed",
+        "https://FIXTURE.example/observed?utm_source=another#section",
+    ],
+)
+async def test_preselected_fetched_page_cannot_be_fetched_again(chosen_url):
+    app, requests, calls = make_app(
+        [{"tool": "web_fetch", "args": {"url": chosen_url}}], web_tools()
+    )
+    traces = []
+    result = await run_adaptive(
+        app,
+        "Read the selected web page and explain it",
+        [],
+        asyncio.Event(),
+        initial_sources=[
+            {"url": "https://fixture.example/observed", "text": "Already read factual evidence"}
+        ],
+        used_steps=1,
+        traces=traces,
+    )
+    assert not calls and len(requests) == 1
+    assert result["stop_reason"] == "repeated_action"
+    assert "Already read factual evidence" in result["content"]
+    assert result["sources"][0]["fetched"]
+    assert result["tool_steps"]["total"] == 0
+    assert traces[-1]["error_code"] == "adaptive_repeated_action"

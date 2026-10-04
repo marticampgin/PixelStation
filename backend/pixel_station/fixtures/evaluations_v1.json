@@ -1,5 +1,5 @@
 {
-  "version": "pixel-station-critical-v2",
+  "version": "pixel-station-critical-v3",
   "routes": [
     {"input": "Explain photosynthesis briefly", "expected": "normal_chat"},
     {"input": "Create a CSV file named fixture.csv", "expected": "file_create"},
@@ -31,5 +31,22 @@
     "queries": ["fixture current source", "fixture corroborating source"],
     "observed_urls": ["https://fixture.example/observed-a", "https://fixture.example/observed-b"],
     "invented_url": "https://fixture.example/invented-by-model"
+  },
+  "document_dates": {
+    "filename": "fixture-contract.txt",
+    "prompt": "Give the exact signature and rental dates from the document",
+    "values": ["02.10.2099 TEST", "16.–18.10.2099 (TEST)"],
+    "distractor_paragraphs": 8
+  },
+  "adaptive_stop": {
+    "url": "https://fixture.example/observed",
+    "fact": "The observed fixture release is version 487.",
+    "prompt": "/task Search web, read a page and explain the observed release"
+  },
+  "calendar_bounds": {
+    "time_min": "2099-10-25T00:00:00+03:00",
+    "time_max": "2099-10-26T00:00:00+02:00",
+    "all_day_start": "2099-10-25",
+    "all_day_end": "2099-10-26"
   }
 }

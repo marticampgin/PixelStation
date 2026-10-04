@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import re
+import time
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -32,6 +33,8 @@ def _action_key(tool: str, args: dict) -> str:
         normalized["query"] = normalized["query"].casefold()
     if isinstance(normalized.get("attachment_ids"), list):
         normalized["attachment_ids"] = sorted(set(normalized["attachment_ids"]))
+    if tool == "web_fetch" and isinstance(normalized.get("url"), str):
+        normalized["url"] = canonical_url(normalized["url"])
     return hashlib.sha256(
         json.dumps({"tool": tool, "args": normalized}, sort_keys=True, ensure_ascii=False).encode()
     ).hexdigest()
@@ -277,6 +280,7 @@ async def _run_adaptive(
     traces: list[dict] | None = None,
     initial_sources: list[dict] | None = None,
     used_steps: int = 0,
+    deadline: float | None = None,
 ) -> dict:
     settings = app.state.settings()
     request = re.sub(
@@ -309,8 +313,13 @@ async def _run_adaptive(
         canonical_url(source["url"]): source["url"] for source in (initial_sources or [])
     }
     observed_threads: set[str] = set()
-    sources = {canonical_url(source["url"]): source for source in (initial_sources or [])}
-    seen: set[str] = set()
+    sources = {
+        canonical_url(source["url"]): {**source, "fetched": True}
+        for source in (initial_sources or [])
+    }
+    seen: set[str] = {
+        _action_key("web_fetch", {"url": source["url"]}) for source in (initial_sources or [])
+    }
     traces = traces if traces is not None else []
     steps = 0
     repairs = 0
@@ -333,7 +342,10 @@ async def _run_adaptive(
         getattr(getattr(app.state, "integration_services", None), "google", None), "gmail", None
     )
     gmail_binding = None
-    async with asyncio.timeout(ADAPTIVE_TIMEOUT):
+    remaining = ADAPTIVE_TIMEOUT if deadline is None else deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("Adaptive deadline already reached")
+    async with asyncio.timeout(remaining):
         while steps + used_steps < settings.max_steps:
             if cancel_event.is_set():
                 raise asyncio.CancelledError
@@ -396,7 +408,13 @@ async def _run_adaptive(
                         "error_type": type(exc).__name__,
                     }
                 )
-                if repairs or getattr(exc, "code", None) == "adaptive_repeated_action":
+                if getattr(exc, "code", None) == "adaptive_repeated_action" and observations:
+                    # A weak chooser can ask for a page it already read. Do not
+                    # execute it again or throw away useful prior evidence. The
+                    # caller reports a stopped task, rather than confirmed success.
+                    stop_reason = "repeated_action"
+                    break
+                if repairs:
                     raise safe_error from exc
                 repairs += 1
                 correction = str(safe_error)

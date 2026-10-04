@@ -23,7 +23,7 @@ from .poker import act, legal_actions, new_game, public_view
 from .providers.reasoning import ReasoningFilter
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "evaluations_v1.json"
-RUNNER_VERSION = 5
+RUNNER_VERSION = 6
 
 
 def fixtures() -> dict:
@@ -46,6 +46,14 @@ def fixture_identity() -> dict:
         "version": fixtures()["version"],
         "sha256": hashlib.sha256(FIXTURE_PATH.read_bytes()).hexdigest(),
         "poker": poker_identity,
+        "task_source_sha256": hashlib.sha256(
+            (Path(__file__).parent / "adaptive.py").read_bytes()
+            + (Path(__file__).parent / "chat.py").read_bytes()
+        ).hexdigest(),
+        "calendar_source_sha256": hashlib.sha256(
+            (Path(__file__).parent / "google_tools.py").read_bytes()
+            + (Path(__file__).parent / "providers" / "google.py").read_bytes()
+        ).hexdigest(),
     }
 
 
@@ -290,10 +298,9 @@ def deterministic_cases() -> list[dict]:
         )
         actual_attachments = list(decoded.iter_attachments())
         plain_body = decoded.get_body(preferencelist=("plain",))
-        body_preserved = (
-            plain_body is not None
-            and plain_body.get_content().rstrip("\r\n") == email["body"].rstrip("\r\n")
-        )
+        body_preserved = plain_body is not None and plain_body.get_content().rstrip(
+            "\r\n"
+        ) == email["body"].rstrip("\r\n")
         attachment_preserved = (
             len(actual_attachments) == 1
             and actual_attachments[0].get_payload(decode=True) == attachment
@@ -449,6 +456,202 @@ def deterministic_cases() -> list[dict]:
             "scope_note": "Production research DAG with synthetic provider observations; not a live provider/model quality probe.",
         }
 
+    def document_dates():
+        from .app import create_app
+        from .chat import ConversationCreate, MessageInput, generate_response, new_conversation
+        from .files import ingest, retrieve_files
+
+        rows = fixture["document_dates"]
+        calls = 0
+        distractor = "Give the exact signature and rental dates. " * 70
+        content = "\n\n".join(
+            [
+                "Rental date: " + rows["values"][1],
+                *([distractor] * rows["distractor_paragraphs"]),
+                "Recorded signing: " + rows["values"][0],
+            ]
+        )
+
+        class NoInference:
+            async def stream(self, *args, **kwargs):
+                nonlocal calls
+                calls += 1
+                raise AssertionError("Explicit literal dates should not be rewritten by a model")
+                yield ""
+
+        async def execute(directory):
+            app = create_app(Path(directory), llm=NoInference(), discover=False)
+            try:
+                with app.state.database.session() as session:
+                    attachment = ingest(
+                        session, Path(directory), rows["filename"], content.encode("utf-8")
+                    )
+                    conversation = new_conversation(ConversationCreate(), session)
+                    attachment_id = attachment.id
+                    ordinary = retrieve_files(session, [attachment_id], rows["prompt"])
+                    late_field_omitted_by_ordinary_ranking = all(
+                        rows["values"][0] not in source["text"] for source in ordinary
+                    )
+                events = [
+                    json.loads(event)
+                    async for event in generate_response(
+                        app,
+                        conversation["id"],
+                        MessageInput(content=rows["prompt"], attachment_ids=[attachment_id]),
+                    )
+                ]
+                return events[-1]["message"], late_field_omitted_by_ordinary_ranking
+            finally:
+                if app.state.background_tasks:
+                    await asyncio.gather(*app.state.background_tasks)
+                app.state.database.engine.dispose()
+
+        with tempfile.TemporaryDirectory(prefix="pixel-station-dates-") as directory:
+            message, ordinary_omits_late_field = asyncio.run(execute(directory))
+        exact = all(value in message["content"] for value in rows["values"])
+        cited = rows["filename"] in message["content"]
+        return {
+            "passed": exact
+            and cited
+            and ordinary_omits_late_field
+            and message["status"] == "complete"
+            and calls == 0,
+            "range_and_qualifiers_preserved": exact,
+            "source_citation_present": cited,
+            "late_date_beyond_ordinary_retrieval_covered": ordinary_omits_late_field,
+            "model_calls": calls,
+            "scope_note": "Production chat and parsed source for explicit exact/verbatim numeric date questions; no semantic field attribution or general model-quality claim.",
+        }
+
+    def adaptive_stop():
+        from .app import create_app
+        from .chat import ConversationCreate, MessageInput, generate_response, new_conversation
+
+        rows = fixture["adaptive_stop"]
+        executions = []
+
+        class RepeatChooser:
+            def __init__(self):
+                self.actions = [
+                    {"tool": "web_search", "args": {"query": "fixture release"}},
+                    {"tool": "web_fetch", "args": {"url": rows["url"]}},
+                    {"tool": "web_fetch", "args": {"url": rows["url"]}},
+                ]
+
+            async def structured(self, model, messages, schema, **kwargs):
+                return schema.model_validate(self.actions.pop(0))
+
+            async def stream(self, model, messages, **kwargs):
+                assert rows["fact"] in json.dumps(messages)
+                yield rows["fact"]
+
+        async def execute(directory):
+            app = create_app(Path(directory), llm=RepeatChooser(), discover=False)
+            settings = app.state.settings()
+            settings.roles["primary_chat"] = "fixture:model"
+            app.state.set_settings(settings)
+
+            async def search(query):
+                executions.append("search")
+                return [{"url": rows["url"], "title": "Observed fixture"}]
+
+            async def fetch(url):
+                executions.append("fetch")
+                return {"url": url, "text": rows["fact"]}
+
+            app.state.tool_registry.tools["web_search"].execute = search
+            app.state.tool_registry.tools["web_fetch"].execute = fetch
+            try:
+                with app.state.database.session() as session:
+                    conversation = new_conversation(ConversationCreate(), session)
+                events = [
+                    json.loads(event)
+                    async for event in generate_response(
+                        app, conversation["id"], MessageInput(content=rows["prompt"])
+                    )
+                ]
+                return events[-1]["message"]
+            finally:
+                if app.state.background_tasks:
+                    await asyncio.gather(*app.state.background_tasks)
+                app.state.database.engine.dispose()
+
+        with tempfile.TemporaryDirectory(prefix="pixel-station-adaptive-") as directory:
+            message = asyncio.run(execute(directory))
+        retained = rows["fact"] in message["content"]
+        signals = [
+            trace
+            for trace in message["traces"]
+            if trace.get("error_code") == "adaptive_repeated_action"
+        ]
+        return {
+            "passed": executions == ["search", "fetch"]
+            and retained
+            and message["status"] == "interrupted"
+            and bool(signals),
+            "duplicate_tool_not_executed": executions == ["search", "fetch"],
+            "observed_evidence_retained": retained,
+            "confirmed_success_not_reported": message["status"] == "interrupted",
+            "structured_stop_signal_present": bool(signals),
+            "scope_note": "Production task and answer paths with an intentionally repeating synthetic chooser; not a live-model quality score.",
+        }
+
+    def calendar_bounds():
+        from pydantic import ValidationError
+
+        from .google_tools import CalendarReadArguments
+        from .providers.google import GoogleConnection
+        from .providers.web import IntegrationError
+
+        rows = fixture["calendar_bounds"]
+        read = CalendarReadArguments(time_min=rows["time_min"], time_max=rows["time_max"])
+        timed = {
+            "summary": "Fixture appointment",
+            "start": {"dateTime": rows["time_min"]},
+            "end": {"dateTime": rows["time_max"]},
+        }
+        all_day = {
+            "summary": "Fixture day",
+            "start": {"date": rows["all_day_start"]},
+            "end": {"date": rows["all_day_end"]},
+        }
+        valid = (
+            GoogleConnection.validate_event(timed) == timed
+            and GoogleConnection.validate_event(all_day) == all_day
+        )
+        rejected = 0
+        for start, end in (
+            (rows["time_max"], rows["time_min"]),
+            ("2099-10-25T00:00:00", "2099-10-26T00:00:00"),
+            ("2099-01-01T00:00:00Z", "2101-01-01T00:00:00Z"),
+        ):
+            try:
+                CalendarReadArguments.model_validate({"time_min": start, "time_max": end})
+            except ValidationError:
+                rejected += 1
+        for event in (
+            {**timed, "end": timed["start"]},
+            {**timed, "start": {"dateTime": "2099-10-25T00:00:00"}},
+            {**timed, "end": all_day["end"]},
+            {**all_day, "end": all_day["start"]},
+        ):
+            try:
+                GoogleConnection.validate_event(event)
+            except IntegrationError:
+                rejected += 1
+        offsets = (
+            read.time_min.isoformat() == rows["time_min"]
+            and read.time_max.isoformat() == rows["time_max"]
+        )
+        return {
+            "passed": valid and offsets and rejected == 7,
+            "explicit_offsets_preserved": offsets,
+            "all_day_exclusive_end_preserved": valid,
+            "invalid_ranges_rejected": rejected,
+            "external_requests": 0,
+            "scope_note": "Production Calendar schemas and payload validation with explicit timestamps; does not test natural-language interpretation, Google authorization or live writes.",
+        }
+
     for identifier, label, operation in (
         ("routing", "Deterministic intent routing", routing),
         ("latest_context", "Latest request and context budget", context),
@@ -464,6 +667,17 @@ def deterministic_cases() -> list[dict]:
             "Research fetch targets follow actual observations",
             observed_workflow,
         ),
+        (
+            "document_dates",
+            "Exact document dates preserve full ranges and qualifiers",
+            document_dates,
+        ),
+        (
+            "adaptive_stop",
+            "Repeated tasks preserve evidence and report stopped work",
+            adaptive_stop,
+        ),
+        ("calendar_bounds", "Calendar offsets, exclusive ends and invalid ranges", calendar_bounds),
     ):
         check(identifier, label, operation)
     return cases

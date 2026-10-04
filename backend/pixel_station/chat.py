@@ -9,15 +9,16 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .adaptive import run_adaptive
+from .adaptive import ADAPTIVE_TIMEOUT, run_adaptive
 from .context import approximate_tokens, build_context, clip, input_budget
 from .database import (
     AgentRun,
     Attachment,
     Conversation,
+    DocumentChunk,
     FrictionEvent,
     Message,
     get_session,
@@ -36,6 +37,14 @@ from .providers.web import canonical_url
 from .research import run_research, validate_research_plan
 
 router = APIRouter(prefix="/api", tags=["chat"])
+
+MAX_DATE_SCAN_CHUNKS = 1000
+MAX_DATE_SCAN_CHARS = 200000
+DATE_PATTERN = re.compile(
+    r"(?<!\d)(?:\d{4}-\d{2}-\d{2}(?:\s*[–—−-]\s*\d{4}-\d{2}-\d{2})?"
+    r"|\d{1,2}\.\s*(?:[–—−-]\s*\d{1,2}\.\s*)?\d{1,2}\.\s*\d{4}"
+    r"(?:\s*[–—−-]\s*\d{1,2}\.\s*\d{1,2}\.\s*\d{4})?)(?!\d)"
+)
 
 
 class ConversationCreate(BaseModel):
@@ -183,6 +192,161 @@ def validated_citations(content: str, sources: list[dict]) -> tuple[str, list[st
         return match.group(0)
 
     return re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", replace, content), removed
+
+
+def exact_date_request(request: str) -> bool:
+    return bool(
+        re.search(r"\b(exact(?:ly)?|verbatim|literal(?:ly)?|as written)\b", request, re.I)
+        and re.search(r"\b(dates?|signature|signing|rental|rent)\b", request, re.I)
+        and not re.search(
+            r"\b(services?|packages?|membership|member|price|amount|fees?|names?|address|payment|bank|summar\w*|create|edit|change|compare|translate)\b",
+            request,
+            re.I,
+        )
+    )
+
+
+def indexed_date_context(session: Session, ids: list[str]) -> tuple[list[dict], dict]:
+    """Scan active indexes in source order, independently of relevance ranking."""
+    records = {
+        row.id: row for row in session.scalars(select(Attachment).where(Attachment.id.in_(ids)))
+    }
+    indexed = set(
+        session.scalars(
+            select(DocumentChunk.attachment_id)
+            .where(DocumentChunk.attachment_id.in_(ids))
+            .distinct()
+        )
+    )
+    metadata = {
+        "selected_records": len(ids),
+        "indexed_records": len(indexed),
+        "candidate_chunks_scanned": 0,
+        "characters_scanned": 0,
+        "scan_limit_reached": False,
+        "excerpt_limit_reached": False,
+        "incomplete_index": any(
+            identity not in records
+            or identity not in indexed
+            or records[identity].parse_status != "ready"
+            for identity in ids
+        ),
+    }
+    # A four-digit number is a deliberately broad SQL prefilter for supported
+    # numeric years. The date pattern subsequently rejects unrelated numbers.
+    statement = (
+        select(
+            DocumentChunk.id,
+            DocumentChunk.attachment_id,
+            DocumentChunk.location,
+            DocumentChunk.page,
+            DocumentChunk.number,
+            DocumentChunk.heading,
+            func.substr(DocumentChunk.text, 1, MAX_DATE_SCAN_CHARS + 1).label("text"),
+            func.length(DocumentChunk.text).label("text_length"),
+        )
+        .where(
+            DocumentChunk.attachment_id.in_(ids),
+            DocumentChunk.text.op("GLOB")("*[0-9][0-9][0-9][0-9]*"),
+        )
+        .order_by(DocumentChunk.attachment_id, DocumentChunk.number, DocumentChunk.id)
+        .limit(MAX_DATE_SCAN_CHUNKS + 1)
+    )
+    context = []
+    result = session.execute(statement.execution_options(yield_per=1))
+    try:
+        for row in result:
+            remaining = MAX_DATE_SCAN_CHARS - metadata["characters_scanned"]
+            if metadata["candidate_chunks_scanned"] >= MAX_DATE_SCAN_CHUNKS or remaining <= 0:
+                metadata["scan_limit_reached"] = True
+                break
+            value = row.text[:remaining]
+            metadata["candidate_chunks_scanned"] += 1
+            metadata["characters_scanned"] += len(value)
+            if row.text_length > remaining:
+                # Do not quote a field whose range or qualifier may have been cut
+                # by the scanning character limit.
+                value = value.rsplit("\n", 1)[0] if "\n" in value else ""
+            if DATE_PATTERN.search(value):
+                context.append(
+                    {
+                        "id": row.id,
+                        "file_id": row.attachment_id,
+                        "filename": records[row.attachment_id].filename,
+                        "text": value,
+                        "location": row.location,
+                        "page": row.page,
+                        "number": row.number,
+                        "heading": row.heading,
+                    }
+                )
+            if row.text_length > remaining:
+                metadata["scan_limit_reached"] = True
+                break
+    finally:
+        result.close()
+    return context, metadata
+
+
+def exact_document_dates(
+    request: str, files: list[dict], *, scan_metadata: dict | None = None
+) -> str | None:
+    """Quote indexed date lines without inferring ambiguous field ownership."""
+    if not exact_date_request(request):
+        return None
+    metadata = scan_metadata if scan_metadata is not None else {}
+    rows = []
+    seen = set()
+    for source in files:
+        for line in source["text"].splitlines():
+            line = line.strip()
+            matches = list(DATE_PATTERN.finditer(line))
+            if not matches:
+                continue
+            # Never cut through the date or its range. Long paragraphs retain
+            # their surrounding wording and display an explicit excerpt marker.
+            for match in matches:
+                start = 0 if len(line) <= 500 else max(0, match.start() - 120)
+                end = len(line) if len(line) <= 500 else min(len(line), match.end() + 200)
+                excerpt = (
+                    ("…" if start else "") + line[start:end] + ("…" if end < len(line) else "")
+                )
+                key = (source["file_id"], source["location"], excerpt)
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(f"> {excerpt}\n\n[{source['filename']}, {source['location']}]")
+                if len(rows) > 8:
+                    break
+            if len(rows) > 8:
+                break
+        if len(rows) > 8:
+            break
+    if not rows:
+        return None
+    metadata["excerpt_limit_reached"] = len(rows) > 8
+    content = (
+        "Date text exactly as written in indexed excerpts. Separate lines are not assigned to a field unless the source labels them:\n\n"
+        + "\n\n".join(rows[:8])
+    )
+    notices = []
+    if metadata.get("excerpt_limit_reached"):
+        notices.append("Additional date excerpts were omitted by the eight-excerpt output limit.")
+    if metadata.get("scan_limit_reached"):
+        notices.append(
+            f"The scan stopped at {MAX_DATE_SCAN_CHUNKS} candidate chunks or {MAX_DATE_SCAN_CHARS:,} characters; other date text may remain."
+        )
+    if metadata.get("incomplete_index"):
+        notices.append(
+            "One or more selected records have no complete text index; their dates may be missing."
+        )
+    content += "\n\n" + " ".join(
+        notices
+        + [
+            "Only supported numeric dates in indexed text were checked; unrecognized or unindexed document content is outside this result."
+        ]
+    )
+    return content
 
 
 def combine_research_sources(selected: list[dict], result: dict, budget: int) -> dict:
@@ -406,11 +570,15 @@ async def generate_response(
     run_id = None
     result_content = ""
     final_status = "interrupted"
+    outcome_override = None
+    stopping_notice = ""
+    date_scan = None
     traces: list[dict] = [{"route": route.model_dump()}]
     measurements: list[dict] = []
     first_token_ms = None
     tool_attempts = 0
     query_vector = None
+    query_embedding_requested = False
     retrieval_completed = False
     cancel_event = asyncio.Event()
     if conversation_id in app.state.active_generations:
@@ -485,7 +653,6 @@ async def generate_response(
             conversation.updated_at, conversation.archived = now(), False
             session.commit()
             user_id = user.id
-            query_vector = await embed_query(app, payload.content)
             # Recent conversation attachment references stay active on subsequent questions.
             messages = list(
                 session.scalars(
@@ -512,6 +679,14 @@ async def generate_response(
             if active_ids and route.intent == "normal_chat":
                 route = route_prompt(payload.content, active_ids)
                 run.route = route.intent
+            literal_dates = bool(
+                route.intent == "file_question"
+                and active_ids
+                and exact_date_request(payload.content)
+            )
+            if not literal_dates:
+                query_embedding_requested = bool(settings.roles["embedding"])
+                query_vector = await embed_query(app, payload.content)
             memories = search_memory(
                 session,
                 payload.content,
@@ -519,8 +694,10 @@ async def generate_response(
                 conversation_id,
                 embedding=query_vector,
             )
-            file_context = retrieve_files(
-                session, active_ids, payload.content, embedding=query_vector
+            file_context = (
+                []
+                if literal_dates
+                else retrieve_files(session, active_ids, payload.content, embedding=query_vector)
             )
             retrieval_completed = True
             files = (
@@ -528,6 +705,8 @@ async def generate_response(
                 if active_ids
                 else []
             )
+            if literal_dates:
+                file_context, date_scan = indexed_date_context(session, active_ids)
             history = [{"role": row.role, "content": row.content} for row in messages[-40:]]
             summary = conversation.summary
             assistant.memory_ids = [memory["id"] for memory in memories]
@@ -571,6 +750,9 @@ async def generate_response(
             {canonical_url(source.url): source for source in payload.web_sources}.values()
         )
         research_budget = settings.max_steps - len(selected_sources)
+        adaptive_deadline = (
+            time.monotonic() + ADAPTIVE_TIMEOUT if route.intent == "adaptive_task" else None
+        )
         direct_content = None
         if selected_sources:
             if len(selected_sources) > settings.max_steps:
@@ -605,6 +787,38 @@ async def generate_response(
             and any(word in payload.content.lower() for word in ("email", "mail"))
         ):
             direct_content = "Email deletion is not supported by the current Gmail scopes. Open Gmail to delete the email."
+        elif route.intent == "file_question" and date_scan is not None:
+            date_quotes = exact_document_dates(
+                payload.content, file_context, scan_metadata=date_scan
+            )
+            direct_content = (
+                date_quotes
+                or "No supported numeric date text was found in the scanned index. This does not establish that the selected documents contain no dates."
+            )
+            if not date_quotes or any(
+                date_scan.get(key)
+                for key in ("scan_limit_reached", "excerpt_limit_reached", "incomplete_index")
+            ):
+                outcome_override = "interrupted"
+                if not date_quotes:
+                    limits = []
+                    if date_scan["scan_limit_reached"]:
+                        limits.append(
+                            f"The scan was limited to {MAX_DATE_SCAN_CHUNKS} candidate chunks and {MAX_DATE_SCAN_CHARS:,} characters."
+                        )
+                    if date_scan["incomplete_index"]:
+                        limits.append("One or more selected records have no complete text index.")
+                    if limits:
+                        direct_content += " " + " ".join(limits)
+            traces.append(
+                {
+                    "validation": "exact_document_dates",
+                    "source_mode": "verbatim_indexed_lines",
+                    "date_scan": date_scan,
+                    "document_chunk_ids": [source["id"] for source in file_context],
+                    "memory_ids": [],
+                }
+            )
         elif route.intent == "adaptive_task":
             yield ndjson(
                 {
@@ -639,6 +853,7 @@ async def generate_response(
                     traces=traces,
                     initial_sources=fetched,
                     used_steps=len(fetched),
+                    deadline=adaptive_deadline,
                 )
             )
             adaptive_waiter = None
@@ -666,7 +881,17 @@ async def generate_response(
             traces.append({"tool": "adaptive_task", "result": adaptive_result})
             evidence = adaptive_result["content"]
             web_sources = adaptive_result["sources"]
+            if adaptive_result["stop_reason"] == "repeated_action":
+                outcome_override = "interrupted"
+                stopping_notice = "Tool gathering stopped after a repeated action. This answer uses results already gathered; task completion has not been verified."
+            elif adaptive_result["stop_reason"] == "tool_budget":
+                outcome_override = "interrupted"
+                stopping_notice = f"Tool gathering stopped at the configured {settings.max_steps}-step limit. This answer uses results already gathered; task completion has not been verified."
+                traces.append(
+                    {"error_code": "adaptive_budget_exhausted", "stage": "action_validation"}
+                )
             if adaptive_result["incomplete_actions"]:
+                outcome_override = "interrupted"
                 labels = {
                     "web_fetch": "read a web source",
                     "gmail_read": "read the selected Gmail thread",
@@ -677,7 +902,24 @@ async def generate_response(
                     labels.get(tool, tool.replace("_", " "))
                     for tool in adaptive_result["incomplete_actions"]
                 )
-                direct_content = f"Stopped at the configured {settings.max_steps}-step tool limit. Still needed: {remaining}. The completed tool results are available in this response's trace."
+                reason = (
+                    "Stopped after a repeated tool action"
+                    if adaptive_result["stop_reason"] == "repeated_action"
+                    else f"Stopped at the configured {settings.max_steps}-step tool limit"
+                )
+                direct_content = f"{reason}. Still needed: {remaining}. The completed tool results are available in this response's trace."
+                stopping_notice = ""
+            if outcome_override:
+                with app.state.database.session() as session:
+                    session.add(
+                        FrictionEvent(
+                            run_id=run_id,
+                            kind="task_stopped",
+                            details=stopping_notice or direct_content or "Adaptive task stopped",
+                            regression={"input": payload.content, "expected_route": route.intent},
+                        )
+                    )
+                    session.commit()
         elif route.intent == "file_edit":
             yield ndjson(
                 {"type": "status", "stage": "file_edit", "detail": "Preparing a file edit proposal"}
@@ -972,7 +1214,11 @@ async def generate_response(
                     )
         if not result_content.strip():
             raise RuntimeError("The local model returned no answer. Check the model and try again.")
-        final_status = "complete"
+        if stopping_notice:
+            notice = "\n\n" + stopping_notice
+            result_content += notice
+            yield ndjson({"type": "token", "content": notice})
+        final_status = outcome_override or "complete"
     except asyncio.CancelledError:
         final_status = "interrupted"
         # StreamingResponse propagates disconnect cancellation; persistence runs in finally.
@@ -1028,7 +1274,7 @@ async def generate_response(
                                 first_token_ms=first_token_ms,
                                 tool_attempts=tool_attempts,
                                 retrieval_fallback=bool(
-                                    settings.roles["embedding"]
+                                    query_embedding_requested
                                     and query_vector is None
                                     and retrieval_completed
                                 ),
