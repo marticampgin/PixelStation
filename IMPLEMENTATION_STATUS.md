@@ -41,12 +41,12 @@
 
 ## Currently working
 
-- Image generation and quality profiles are verified locally. Web research is next, followed by Gmail/Calendar; WSL enablement/restart and personal Google OAuth remain owner steps.
+- Image generation and quality profiles are verified locally. Web research setup is in progress, followed by Gmail/Calendar. WSL is installed; a full Windows Restart must complete pending virtualization-platform installation before Docker/SearXNG can run. Personal Google OAuth remains an owner step.
 
 ## Blocked on account or system setup
 
 - **Core application:** no installation blocker remains on this machine.
-- **Web research:** SearXNG is not installed/running. The documented Windows container setup requires Docker Desktop/WSL 2 and administrator/system setup.
+- **Web research:** SearXNG is not installed/running. On 2026-10-04, WSL 3.0.1 was installed and Virtual Machine Platform was enabled, but Windows servicing still had its compute-service installation pending after a Fast Startup/hybrid boot. The hypervisor was already running; these observations do not justify a BIOS change. Choose Start → Power → Restart and let Windows finish updates, then recheck WSL before continuing. Official Docker Desktop 4.93.0 is downloaded under ignored `.tools`, with a valid Docker Inc signature and a matching official SHA-256; it has not been installed or launched. Search, source fetches and model-planned research remain unverified against live SearXNG.
 - **Google:** Cloud project/OAuth credentials, personal login and consent require the owner. Live Gmail/Calendar account operations remain unverified; provider and approval behavior are covered with isolated tests.
 - A vision model is optional and currently unassigned. Scanned-document/OCR fallback may need first-use parsing model downloads.
 

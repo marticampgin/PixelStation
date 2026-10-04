@@ -6,7 +6,9 @@ Pixel Station uses local Ollama for inference. Web search, image generation and 
 
 The local search endpoint defaults to `http://127.0.0.1:8888`. This repository includes a single-service optional Compose configuration; JSON search is explicitly enabled. Search queries leave the machine through the upstream engines selected by SearXNG. Source fetches use public HTTP(S) webpages. [SearXNG search API](https://docs.searxng.org/dev/search_api.html).
 
-On Windows, install Docker Desktop with a working Linux-container backend first. Enabling WSL/virtualization may require administrator approval and a restart. Once Docker is running, execute from the repository root:
+On Windows, install Docker Desktop with a working Linux-container backend first. Enabling WSL/virtualization may require administrator approval and a restart. Check `wsl --version` and `wsl --status` before starting Docker. If feature installation remains pending after shutting down and turning the PC back on, save your work and choose **Start → Power → Restart**, allowing Windows updates to finish. Fast Startup can retain a prior kernel session and leave installation pending; an enabled feature alone does not prove its services are ready. [Microsoft's Fast Startup troubleshooting](https://learn.microsoft.com/en-us/troubleshoot/windows-client/setup-upgrade-and-drivers/updates-not-install-with-fast-startup).
+
+Once Docker is running, execute from the repository root:
 
 ```powershell
 $searchSecret = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
@@ -14,7 +16,7 @@ $searchSecret = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N'
 docker compose --env-file config/.env -f config/docker-compose.optional.yml up -d
 ```
 
-The ignored `config/.env` is local configuration. The Compose configuration publishes only on the host loopback address, so the service is not exposed to the LAN. Change Settings → Web → SearXNG endpoint if your service uses another address. Use Test search to verify it with an actual query.
+The ignored `config/.env` is local configuration. The Compose configuration publishes only on the host loopback address, so the service is not exposed to the LAN. Change Settings → Web → SearXNG endpoint if your service uses another address. **Test connection** checks the SearXNG configuration endpoint; it does not prove an upstream search succeeds. Use the Web workspace to perform an actual search, open a returned source and then request research before treating the integration as verified.
 
 ```powershell
 docker compose --env-file config/.env -f config/docker-compose.optional.yml logs --tail 100
