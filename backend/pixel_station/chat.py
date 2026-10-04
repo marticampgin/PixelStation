@@ -4,11 +4,11 @@ import json
 import re
 import time
 from dataclasses import dataclass
-from typing import Literal
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -29,8 +29,9 @@ from .google_tools import google_chat_action
 from .indexing import embed_query
 from .memory import MemoryInput, compact_conversation, create_memory, search_memory
 from .observability import provider_observations, run_metrics
-from .orchestration import Plan, Route, classify_ambiguous, route_prompt
+from .orchestration import Plan, PlanStep, Route, classify_ambiguous, route_prompt
 from .providers import UnsupportedToolCall
+from .providers.web import canonical_url
 from .research import run_research, validate_research_plan
 
 router = APIRouter(prefix="/api", tags=["chat"])
@@ -140,6 +141,33 @@ class CriticOutput(BaseModel):
     revised_response: str = Field(default="", max_length=100000)
 
 
+class ResearchQueries(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    queries: list[
+        Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
+    ] = Field(min_length=1, max_length=2)
+
+
+def research_plan_from_queries(judgment: ResearchQueries, budget: int) -> Plan:
+    """Models choose searches; application code owns IDs, dependencies, and fetch targets."""
+    count = min(2, budget)
+    if len(judgment.queries) != count:
+        raise ValueError(f"Research needs exactly {count} focused search queries")
+    if len({query.casefold() for query in judgment.queries}) != count:
+        raise ValueError("Research needs distinct search queries")
+    steps = [
+        PlanStep(id=f"s{index}", tool="web_search", args={"query": query})
+        for index, query in enumerate(judgment.queries, 1)
+    ]
+    if budget >= 3:
+        steps.append(
+            PlanStep(id="f1", tool="web_fetch", args_from="s1", depends_on=["s1"], result_index=0)
+        )
+    plan = Plan(steps=steps)
+    validate_research_plan(plan, budget)
+    return plan
+
+
 def validated_citations(content: str, sources: list[dict]) -> tuple[str, list[str]]:
     import re
 
@@ -154,6 +182,44 @@ def validated_citations(content: str, sources: list[dict]) -> tuple[str, list[st
         return match.group(0)
 
     return re.sub(r"\[([^\]]+)\]\((https?://[^\s)]+)\)", replace, content), removed
+
+
+def combine_research_sources(selected: list[dict], result: dict, budget: int) -> dict:
+    """Keep selected pages in the bounded research evidence and count their reads once."""
+    aliases = {
+        canonical_url(source.get("requested_url") or source["url"]): canonical_url(source["url"])
+        for source in selected
+    }
+    sources: dict[str, dict] = {}
+    for source in [
+        *({**source, "fetched": True} for source in selected),
+        *result.get("sources", []),
+    ]:
+        url = canonical_url(source["url"])
+        key = aliases.get(url, url)
+        if key not in sources or (source.get("fetched") and not sources[key].get("fetched")):
+            sources[key] = {
+                **source,
+                "title": source.get("title", "")[:1000],
+                "text": source.get("text", "")[:8000],
+                "snippet": source.get("snippet", "")[:4000],
+            }
+    bounded = sorted(sources.values(), key=lambda source: not source.get("fetched", False))[:8]
+    counts = result["tool_steps"]
+    return {
+        **result,
+        "sources": bounded,
+        "tool_steps": {
+            **counts,
+            "fetch": counts["fetch"] + len(selected),
+            "total": counts["total"] + len(selected),
+            "budget": budget,
+        },
+        "content": "\n\n".join(
+            f"[{index}] {source['title']}\n{source['url']}\n{source['text'] or source['snippet']}"
+            for index, source in enumerate(bounded, 1)
+        )[:32000],
+    }
 
 
 async def stream_with_cancel(provider, model, messages, cancel_event, stream_kwargs=None):
@@ -333,7 +399,7 @@ async def generate_response(
     settings = app.state.settings()
     model = payload.model or settings.roles["primary_chat"]
     route = route_prompt(payload.content, payload.attachment_ids)
-    if payload.web_sources:
+    if payload.web_sources and route.intent != "web_research":
         route = Route(intent="normal_chat", complexity="tool", tools_needed=["web_fetch"])
     assistant_id = None
     run_id = None
@@ -487,25 +553,34 @@ async def generate_response(
         )
         evidence = ""
         web_sources = []
+        fetched = []
+        selected_sources = list(
+            {canonical_url(source.url): source for source in payload.web_sources}.values()
+        )
+        research_budget = settings.max_steps - len(selected_sources)
         direct_content = None
-        if payload.web_sources:
-            if len(payload.web_sources) > settings.max_steps:
+        if selected_sources:
+            if len(selected_sources) > settings.max_steps:
                 raise ValueError(
-                    f"Reading {len(payload.web_sources)} selected sources exceeds the {settings.max_steps}-step tool budget. Select fewer sources or increase max steps in Settings."
+                    f"Reading {len(selected_sources)} selected sources exceeds the {settings.max_steps}-step tool budget. Select fewer sources or increase max steps in Settings."
+                )
+            if route.intent == "web_research" and research_budget < 1:
+                raise ValueError(
+                    "Selected sources leave no tool budget for research searches. Select fewer sources or increase max steps in Settings."
                 )
             yield ndjson(
                 {
                     "type": "status",
                     "stage": "reading_sources",
-                    "detail": f"Reading {len(payload.web_sources)} selected sources",
+                    "detail": f"Reading {len(selected_sources)} selected sources",
                 }
             )
             async with asyncio.timeout(60):
-                tool_attempts += len(payload.web_sources)
+                tool_attempts += len(selected_sources)
                 fetched = await asyncio.gather(
                     *(
                         app.state.integration_services.web.fetch(source.url)
-                        for source in payload.web_sources
+                        for source in selected_sources
                     )
                 )
             web_sources = [{"url": item["url"], "title": item.get("title", "")} for item in fetched]
@@ -558,23 +633,34 @@ async def generate_response(
             async with asyncio.timeout(integration_timeout):
                 if route.intent == "web_research" and model:
                     async with asyncio.timeout(90), app.state.model_queue.lock:
+                        query_count = min(2, research_budget)
                         plan_messages = [
                             {
                                 "role": "system",
-                                "content": f"Plan a read-only research DAG with at most {settings.max_steps} total steps. Only web_search and web_fetch are available. Use 2–4 independent web_search steps with args={{query:...}}, fewer only when the step budget is below 2. Each web_fetch must have args={{}}, args_from=<search step id>, result_index=0 or 1, depends_on=[<same search step id>]. Never write a URL yourself. Include at least one fetch when budget >=3. IDs must be unique; no cycles. Example budget3: search s1, search s2, fetch f1 depending on s1.",
+                                "content": f"Choose exactly {query_count} distinct focused web search queries for the user's research request. Return only JSON with a queries list. No tools, steps, dependencies, URLs, or explanation.\n"
+                                + json.dumps(
+                                    {
+                                        "queries": [
+                                            f"focused query {index + 1}"
+                                            for index in range(query_count)
+                                        ]
+                                    }
+                                ),
                             },
                             {"role": "user", "content": payload.content},
                         ]
                         for plan_attempt in range(2):
+                            returned_query_count = None
                             try:
-                                plan = await app.state.llm.structured(
+                                judgment = await app.state.llm.structured(
                                     settings.roles["planner"] or model,
                                     plan_messages,
-                                    Plan,
+                                    ResearchQueries,
                                     validation_retries=0,
-                                    num_predict=1536,
+                                    num_predict=512,
                                 )
-                                validate_research_plan(plan, settings.max_steps)
+                                returned_query_count = len(judgment.queries)
+                                plan = research_plan_from_queries(judgment, research_budget)
                                 break
                             except (ValueError, RuntimeError) as exc:
                                 traces.append(
@@ -582,6 +668,11 @@ async def generate_response(
                                         "validation": "research_plan_error",
                                         "retry": plan_attempt,
                                         "error": str(exc)[:500],
+                                        **(
+                                            {"query_count": returned_query_count}
+                                            if returned_query_count is not None
+                                            else {}
+                                        ),
                                     }
                                 )
                                 if plan_attempt == 1:
@@ -589,7 +680,7 @@ async def generate_response(
                                 plan_messages.append(
                                     {
                                         "role": "user",
-                                        "content": f"Correct the plan once. Validation error: {str(exc)[:500]}. Use only the allowed tools and fields.",
+                                        "content": f"Correct the queries once. {str(exc)[:500]}. Return exactly {query_count} distinct focused queries in the queries list.",
                                     }
                                 )
                     traces.append({"plan": plan.model_dump()})
@@ -609,7 +700,7 @@ async def generate_response(
                         )
 
                     research_task = asyncio.create_task(
-                        run_research(plan, app.state.tool_registry, settings.max_steps, on_step)
+                        run_research(plan, app.state.tool_registry, research_budget, on_step)
                     )
                     waiter = None
                     try:
@@ -632,6 +723,15 @@ async def generate_response(
                         await asyncio.gather(
                             research_task, *([waiter] if waiter else []), return_exceptions=True
                         )
+                elif route.intent == "web_research":
+                    result = await services.web.research(
+                        [payload.content], limit=4, max_steps=research_budget
+                    )
+                    tool_result = {
+                        "content": result["context"],
+                        "sources": result["sources"],
+                        "tool_steps": result["tool_steps"],
+                    }
                 elif route.intent in {
                     "gmail_search",
                     "gmail_read",
@@ -645,6 +745,8 @@ async def generate_response(
                     tool_result = await google_chat_action(app, route.intent, payload.content)
                 else:
                     tool_result = await services.chat_context(route.intent, payload.content)
+            if route.intent == "web_research" and fetched:
+                tool_result = combine_research_sources(fetched, tool_result, settings.max_steps)
             traces.append({"tool": route.intent, "result": tool_result})
             web_sources = tool_result.get("sources", [])
             if (

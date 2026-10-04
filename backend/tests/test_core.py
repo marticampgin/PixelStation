@@ -11,6 +11,7 @@ from pixel_station.app import create_app
 from pixel_station.chat import (
     AnswerReset,
     MessageInput,
+    ResearchQueries,
     generate_response,
     stream_with_cancel,
     validated_citations,
@@ -76,24 +77,8 @@ class FakeLLM:
             return schema(filename="notes.md", format="md", content="# Notes\nLocally generated")
         if schema.__name__ == "DraftBody":
             return schema(body="Thank you for your email.")
-        if schema.__name__ == "Plan":
-            return schema(
-                steps=[
-                    {"id": "s1", "tool": "web_search", "args": {"query": "local inference facts"}},
-                    {
-                        "id": "s2",
-                        "tool": "web_search",
-                        "args": {"query": "local inference details"},
-                    },
-                    {
-                        "id": "f1",
-                        "tool": "web_fetch",
-                        "args": {},
-                        "depends_on": ["s1"],
-                        "args_from": "s1",
-                    },
-                ]
-            )
+        if schema.__name__ == "ResearchQueries":
+            return schema(queries=["local inference facts", "local inference details"])
         raise AssertionError(f"Unexpected schema {schema}")
 
     async def embed(self, model, texts):
@@ -1090,6 +1075,283 @@ def test_complex_chat_runs_real_read_only_dag(client, app):
     )
     assert trace["result"]["tool_steps"] == {"search": 2, "fetch": 1, "total": 3, "budget": 6}
     assert "Actual fetched evidence" in app.state.llm.requests[-1][0]["content"]
+    plan = next(trace["plan"] for trace in result[-1]["message"]["traces"] if "plan" in trace)
+    fetch_step = plan["steps"][-1]
+    assert fetch_step["args"] == {}
+    assert fetch_step["args_from"] == "s1"
+    assert fetch_step["depends_on"] == ["s1"]
+
+
+def test_research_with_selected_sources_keeps_route_evidence_and_total_budget(client, app):
+    settings = client.get("/api/settings").json()
+    settings["max_steps"] = 4
+    client.put("/api/settings", json=settings)
+    calls = []
+    planning = []
+    structured = app.state.llm.structured
+
+    async def capture_plan(model, messages, schema, **kwargs):
+        if schema is ResearchQueries:
+            planning.append(messages)
+        return await structured(model, messages, schema, **kwargs)
+
+    async def selected_fetch(url):
+        calls.append(("selected_fetch", url))
+        return {"url": url, "title": "Selected page", "text": "Selected page evidence."}
+
+    async def search(query):
+        calls.append(("search", query))
+        return [
+            {"url": "https://example.com/researched", "title": "New page", "snippet": "New"},
+            {
+                "url": "https://example.com/selected#search",
+                "title": "Duplicate selected page",
+                "snippet": "Duplicate",
+            },
+        ]
+
+    async def research_fetch(url):
+        calls.append(("research_fetch", url))
+        return {"url": url, "title": "Read research page", "text": "Research page evidence."}
+
+    async def stream(model, messages, **kwargs):
+        app.state.llm.requests.append(messages)
+        yield "[Selected](https://example.com/selected) and [new](https://example.com/researched)."
+
+    app.state.llm.structured = capture_plan
+    app.state.llm.stream = stream
+    app.state.integration_services.web.fetch = selected_fetch
+    app.state.tool_registry.tools["web_search"].execute = search
+    app.state.tool_registry.tools["web_fetch"].execute = research_fetch
+    cid = client.post("/api/conversations", json={}).json()["id"]
+    result = events(
+        client.post(
+            f"/api/conversations/{cid}/messages",
+            json={
+                "content": "/research Compare the selected source with online sources",
+                "web_sources": [{"url": "https://example.com/selected"}],
+            },
+        )
+    )
+    message = result[-1]["message"]
+    assert message["status"] == "complete"
+    assert message["traces"][0]["route"]["intent"] == "web_research"
+    assert "Choose exactly 2 distinct focused web search queries" in planning[0][0]["content"]
+    assert len(calls) == 4
+    trace = next(trace for trace in message["traces"] if trace.get("tool") == "web_research")
+    assert trace["result"]["tool_steps"] == {"search": 2, "fetch": 2, "total": 4, "budget": 4}
+    assert {source["url"] for source in trace["result"]["sources"]} == {
+        "https://example.com/selected",
+        "https://example.com/researched",
+    }
+    assert "Selected page evidence." in app.state.llm.requests[-1][0]["content"]
+    assert "Research page evidence." in app.state.llm.requests[-1][0]["content"]
+    assert "https://example.com/selected" in message["content"]
+    assert "https://example.com/researched" in message["content"]
+    from pixel_station.database import AgentRun
+
+    with app.state.database.session() as session:
+        run = session.scalar(select(AgentRun).where(AgentRun.conversation_id == cid))
+        assert run.evidence["metrics"]["tool_steps"] == 4
+
+
+@pytest.mark.parametrize("queries", [["same", " SAME "], ["only one"]])
+def test_research_rejects_invalid_queries_before_any_dag_tools(client, app, queries):
+    settings = client.get("/api/settings").json()
+    settings["max_steps"] = 4
+    client.put("/api/settings", json=settings)
+    calls = []
+    query_attempts = []
+    structured = app.state.llm.structured
+
+    async def bad_queries(model, messages, schema, **kwargs):
+        if schema is ResearchQueries:
+            query_attempts.append(messages)
+            return ResearchQueries(queries=queries)
+        return await structured(model, messages, schema, **kwargs)
+
+    async def selected_fetch(url):
+        calls.append(url)
+        return {"url": url, "title": "Selected", "text": "Evidence"}
+
+    app.state.llm.structured = bad_queries
+    app.state.integration_services.web.fetch = selected_fetch
+    cid = client.post("/api/conversations", json={}).json()["id"]
+    result = events(
+        client.post(
+            f"/api/conversations/{cid}/messages",
+            json={
+                "content": "/research Check this selected source against online sources",
+                "web_sources": [{"url": "https://example.com/selected"}],
+            },
+        )
+    )
+    message = result[-1]["message"]
+    assert message["status"] == "error"
+    assert "queries" in message["content"]
+    assert calls == ["https://example.com/selected"]
+    failures = [
+        trace for trace in message["traces"] if trace.get("validation") == "research_plan_error"
+    ]
+    assert len(failures) == 2
+    assert len(query_attempts) == 2
+    assert all(trace["query_count"] == len(queries) for trace in failures)
+    assert not any("plan" in trace for trace in message["traces"])
+
+
+def test_research_repairs_queries_once_then_assembles_legal_dependencies(client, app):
+    attempts = []
+    calls = []
+    structured = app.state.llm.structured
+
+    async def queries(model, messages, schema, **kwargs):
+        if schema is ResearchQueries:
+            attempts.append(messages)
+            assert kwargs["validation_retries"] == 0
+            return ResearchQueries(queries=["one"] if len(attempts) == 1 else ["one", "two"])
+        return await structured(model, messages, schema, **kwargs)
+
+    async def search(query):
+        calls.append(("search", query))
+        return [{"url": f"https://example.com/{query}", "title": query, "snippet": "Snippet"}]
+
+    async def fetch(url):
+        calls.append(("fetch", url))
+        return {"url": url, "title": "Actual page", "text": "Actual page evidence"}
+
+    app.state.llm.structured = queries
+    app.state.tool_registry.tools["web_search"].execute = search
+    app.state.tool_registry.tools["web_fetch"].execute = fetch
+    cid = client.post("/api/conversations", json={}).json()["id"]
+    result = events(
+        client.post(
+            f"/api/conversations/{cid}/messages", json={"content": "/research Local inference"}
+        )
+    )
+    message = result[-1]["message"]
+    assert message["status"] == "complete"
+    assert len(attempts) == 2
+    assert calls == [("search", "one"), ("search", "two"), ("fetch", "https://example.com/one")]
+    failures = [
+        trace for trace in message["traces"] if trace.get("validation") == "research_plan_error"
+    ]
+    assert len(failures) == 1
+    assert failures[0]["query_count"] == 1
+
+
+def test_research_query_contract_rejects_empty_oversized_and_dag_fields():
+    for value in (
+        {"queries": ["   "]},
+        {"queries": ["x" * 501]},
+        {"queries": ["one", "two", "three"]},
+        {"queries": ["one", "two"], "steps": [{"tool": "gmail_send"}]},
+    ):
+        with pytest.raises(ValidationError):
+            ResearchQueries.model_validate(value)
+
+
+def test_research_with_selected_sources_and_one_remaining_search_step(client, app):
+    settings = client.get("/api/settings").json()
+    settings["max_steps"] = 2
+    client.put("/api/settings", json=settings)
+    calls = []
+    structured = app.state.llm.structured
+
+    async def small_plan(model, messages, schema, **kwargs):
+        if schema is ResearchQueries:
+            example = json.loads(messages[0]["content"].split("\n", 1)[1])
+            assert len(example["queries"]) == 1
+            return ResearchQueries(queries=["one"])
+        return await structured(model, messages, schema, **kwargs)
+
+    async def selected_fetch(url):
+        calls.append("fetch")
+        return {"url": url, "title": "Selected", "text": "Previously read evidence"}
+
+    async def search(query):
+        calls.append("search")
+        return [{"url": "https://example.com/new", "title": "New", "snippet": "Search evidence"}]
+
+    app.state.llm.structured = small_plan
+    app.state.integration_services.web.fetch = selected_fetch
+    app.state.tool_registry.tools["web_search"].execute = search
+    cid = client.post("/api/conversations", json={}).json()["id"]
+    result = events(
+        client.post(
+            f"/api/conversations/{cid}/messages",
+            json={
+                "content": "/research Check a selected source",
+                "web_sources": [{"url": "https://example.com/selected"}],
+            },
+        )
+    )
+    message = result[-1]["message"]
+    assert message["status"] == "complete"
+    trace = next(trace for trace in message["traces"] if trace.get("tool") == "web_research")
+    assert trace["result"]["tool_steps"] == {"search": 1, "fetch": 1, "total": 2, "budget": 2}
+    assert calls == ["fetch", "search"]
+    assert "Previously read evidence" in app.state.llm.requests[-1][0]["content"]
+
+
+def test_research_reports_no_remaining_budget_before_reading_selected_sources(client, app):
+    settings = client.get("/api/settings").json()
+    settings["max_steps"] = 1
+    client.put("/api/settings", json=settings)
+
+    async def unexpected_fetch(url):
+        raise AssertionError("An impossible combined workflow must fail before external reads")
+
+    app.state.integration_services.web.fetch = unexpected_fetch
+    cid = client.post("/api/conversations", json={}).json()["id"]
+    result = events(
+        client.post(
+            f"/api/conversations/{cid}/messages",
+            json={
+                "content": "/research Check a selected source",
+                "web_sources": [{"url": "https://example.com/selected"}],
+            },
+        )
+    )
+    assert result[-1]["message"]["status"] == "error"
+    assert "no tool budget for research searches" in result[-1]["message"]["content"]
+    assert not any("plan" in trace for trace in result[-1]["message"]["traces"])
+
+
+def test_plain_selected_source_question_deduplicates_reads_without_research(client, app):
+    settings = client.get("/api/settings").json()
+    settings["max_steps"] = 1
+    client.put("/api/settings", json=settings)
+    calls = []
+
+    async def fetch(url):
+        calls.append(url)
+        return {"url": "https://example.com/selected", "title": "Source", "text": "Real evidence"}
+
+    async def no_search(query):
+        raise AssertionError("A supplied-source question must not search the Web")
+
+    app.state.integration_services.web.fetch = fetch
+    app.state.tool_registry.tools["web_search"].execute = no_search
+    cid = client.post("/api/conversations", json={}).json()["id"]
+    result = events(
+        client.post(
+            f"/api/conversations/{cid}/messages",
+            json={
+                "content": "Explain these selected sources",
+                "web_sources": [
+                    {"url": "https://example.com/selected#one", "text": "forged"},
+                    {"url": "https://example.com/selected#two", "text": "forged"},
+                ],
+            },
+        )
+    )
+    message = result[-1]["message"]
+    assert message["status"] == "complete"
+    assert message["traces"][0]["route"]["intent"] == "normal_chat"
+    assert len(calls) == 1
+    assert not any("plan" in trace for trace in message["traces"])
+    assert "Real evidence" in app.state.llm.requests[-1][0]["content"]
+    assert "forged" not in app.state.llm.requests[-1][0]["content"]
 
 
 def test_selected_sources_cannot_exceed_agent_tool_budget(client, app):
