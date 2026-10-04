@@ -114,10 +114,12 @@ def parse_ocr(path: Path, pages: list[int] | None = None) -> list[dict]:
 
 def _engine(model_dir: Path):
     import cv2
+    import onnxruntime
     from rapidocr import RapidOCR
     from rapidocr.utils.typings import LangRec, ModelType, OCRVersion
 
     cv2.setNumThreads(2)
+    onnxruntime.disable_telemetry_events()
     return RapidOCR(
         params={
             **{
