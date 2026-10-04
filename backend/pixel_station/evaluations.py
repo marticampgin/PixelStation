@@ -1,12 +1,15 @@
 """Versioned critical gates, isolated fixtures, and explicitly requested native probes."""
 
 import asyncio
+import base64
 import hashlib
 import json
 import random
 import re
 import tempfile
 import time
+from email import policy
+from email.parser import BytesParser
 from pathlib import Path
 
 from .config import AppSettings
@@ -20,7 +23,7 @@ from .poker import act, legal_actions, new_game, public_view
 from .providers.reasoning import ReasoningFilter
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "evaluations_v1.json"
-RUNNER_VERSION = 4
+RUNNER_VERSION = 5
 
 
 def fixtures() -> dict:
@@ -262,6 +265,188 @@ def deterministic_cases() -> list[dict]:
         )
         return {"passed": public == "Public answer.", "public_only": public == "Public answer."}
 
+    def gmail_mime():
+        from .providers.google import GoogleConnection
+        from .providers.web import IntegrationError
+
+        email = fixture["gmail_mime"]
+        attachment = email["attachment_text"].encode("utf-8")
+        payload = GoogleConnection.email_payload(
+            email["recipient"],
+            email["subject"],
+            email["body"],
+            thread_id=email["thread_id"],
+            in_reply_to=email["message_id"],
+            attachments=[
+                {
+                    "filename": email["attachment_name"],
+                    "media_type": "text/plain",
+                    "content": attachment,
+                }
+            ],
+        )
+        decoded = BytesParser(policy=policy.default).parsebytes(
+            base64.urlsafe_b64decode(payload["raw"])
+        )
+        actual_attachments = list(decoded.iter_attachments())
+        body_preserved = decoded.get_body(preferencelist=("plain",)).get_content().rstrip(
+            "\r\n"
+        ) == email["body"].rstrip("\r\n")
+        attachment_preserved = (
+            len(actual_attachments) == 1
+            and actual_attachments[0].get_payload(decode=True) == attachment
+            and actual_attachments[0].get_filename() == email["attachment_name"]
+        )
+        headers_preserved = all(
+            str(decoded[name]) == email[key]
+            for name, key in [
+                ("To", "recipient"),
+                ("Subject", "subject"),
+                ("In-Reply-To", "message_id"),
+                ("References", "message_id"),
+            ]
+        )
+        blocked = 0
+        for key in ("to", "subject", "in_reply_to"):
+            hostile = {
+                "to": email["recipient"],
+                "subject": email["subject"],
+                "body": email["body"],
+                "in_reply_to": email["message_id"],
+            }
+            hostile[key] += "\r\nBcc: attacker@example.invalid"
+            try:
+                GoogleConnection.email_payload(**hostile)
+            except IntegrationError:
+                blocked += 1
+        return {
+            "passed": body_preserved
+            and attachment_preserved
+            and headers_preserved
+            and payload.get("threadId") == email["thread_id"]
+            and blocked == 3,
+            "unicode_paragraphs_preserved": body_preserved,
+            "attachment_bytes_preserved": attachment_preserved,
+            "reply_headers_preserved": headers_preserved,
+            "header_injections_rejected": blocked,
+            "external_requests": 0,
+        }
+
+    def web_citations():
+        from .chat import validated_citations
+
+        rows = fixture["web_citations"]
+        expected = rows["allowed_url"]
+        content = f"[Observed fact]({expected}) and [Unsupported claim]({rows['unobserved_url']})"
+        public, removed = validated_citations(
+            content, [{"url": expected, "text": "Observed fixture fact."}]
+        )
+        no_sources, empty_removed = validated_citations(content, [])
+        passed = (
+            f"]({expected})" in public
+            and rows["unobserved_url"] not in public
+            and removed == [rows["unobserved_url"]]
+            and "](https://" not in no_sources
+            and set(empty_removed) == {expected, rows["unobserved_url"]}
+        )
+        return {
+            "passed": passed,
+            "observed_link_retained": f"]({expected})" in public,
+            "unobserved_links_removed": len(removed),
+            "links_without_evidence_removed": len(empty_removed),
+            "scope_note": "Retrieved-URL integrity for Markdown citations; does not grade factual support or freshness.",
+        }
+
+    def observed_workflow():
+        from .chat import ResearchQueries, research_plan_from_queries
+        from .orchestration import Tool, ToolRegistry
+        from .research import run_research, validate_research_plan
+
+        rows = fixture["observed_workflow"]
+        plan = research_plan_from_queries(ResearchQueries(queries=rows["queries"]), 3)
+
+        async def execute(empty_first):
+            registry = ToolRegistry()
+            fetched = []
+
+            async def search(query):
+                index = rows["queries"].index(query)
+                return (
+                    []
+                    if empty_first and index == 0
+                    else [
+                        {
+                            "url": rows["observed_urls"][index],
+                            "title": "Fixture source",
+                            "snippet": "Fixture search observation",
+                        }
+                    ]
+                )
+
+            async def fetch(url):
+                fetched.append(url)
+                return {"url": url, "title": "Fixture source", "text": "Observed fixture page"}
+
+            for identifier, operation, argument in (
+                ("web_search", search, "query"),
+                ("web_fetch", fetch, "url"),
+            ):
+                registry.register(
+                    Tool(
+                        identifier,
+                        identifier,
+                        "Isolated evaluation fixture",
+                        "web",
+                        {
+                            "type": "object",
+                            "properties": {argument: {"type": "string"}},
+                            "required": [argument],
+                            "additionalProperties": False,
+                        },
+                        operation,
+                    )
+                )
+            result = await run_research(plan, registry, 3)
+            return result, fetched
+
+        populated, fetched = asyncio.run(execute(False))
+        empty_first, missing_fetches = asyncio.run(execute(True))
+        injected = Plan.model_validate(
+            {
+                "steps": [
+                    *([step.model_dump() for step in plan.steps[:2]]),
+                    {
+                        "id": "f1",
+                        "tool": "web_fetch",
+                        "args": {"url": rows["invented_url"]},
+                        "depends_on": ["s1"],
+                        "args_from": "s1",
+                    },
+                ]
+            }
+        )
+        rejected = False
+        try:
+            validate_research_plan(injected, 3)
+        except ValueError:
+            rejected = True
+        passed = (
+            fetched == [rows["observed_urls"][0]]
+            and populated["tool_steps"]["total"] == 3
+            and not missing_fetches
+            and empty_first["tool_steps"]["fetch"] == 0
+            and bool(empty_first["errors"])
+            and rejected
+        )
+        return {
+            "passed": passed,
+            "fetch_used_observed_url": fetched == [rows["observed_urls"][0]],
+            "missing_observation_skipped_fetch": not missing_fetches,
+            "model_invented_target_rejected": rejected,
+            "executed_steps": populated["tool_steps"]["total"],
+            "scope_note": "Production research DAG with synthetic provider observations; not a live provider/model quality probe.",
+        }
+
     for identifier, label, operation in (
         ("routing", "Deterministic intent routing", routing),
         ("latest_context", "Latest request and context budget", context),
@@ -270,6 +455,13 @@ def deterministic_cases() -> list[dict]:
         ("memory_retrieval", "FTS5 memory retrieval", memory_retrieval),
         ("poker_invariants", "Legal Poker hand and chip conservation", poker),
         ("reasoning_boundary", "Reasoning is excluded from public output", reasoning),
+        ("gmail_mime", "Gmail Unicode, reply and attachment MIME integrity", gmail_mime),
+        ("web_citations", "Markdown citations require retrieved URLs", web_citations),
+        (
+            "observed_workflow",
+            "Research fetch targets follow actual observations",
+            observed_workflow,
+        ),
     ):
         check(identifier, label, operation)
     return cases

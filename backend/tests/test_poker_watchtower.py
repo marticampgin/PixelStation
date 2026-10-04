@@ -53,7 +53,7 @@ def test_poker_only_native_scope_uses_production_path_and_freezes_settings(tmp_p
         )
         release.set()
         report = wait_evaluation(client, started.json()["id"])
-        assert report["counts"] == {"PASS": 19, "SKIP": 2}
+        assert report["counts"] == {"PASS": 22, "SKIP": 2}
         assert report["poker_native_requested"] is True and report["native_requested"] is False
         assert model.calls == 6
         assert "decision_source_sha256" in report["fixture"]["poker"]

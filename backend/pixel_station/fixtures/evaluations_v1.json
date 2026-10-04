@@ -1,5 +1,5 @@
 {
-  "version": "pixel-station-critical-v1",
+  "version": "pixel-station-critical-v2",
   "routes": [
     {"input": "Explain photosynthesis briefly", "expected": "normal_chat"},
     {"input": "Create a CSV file named fixture.csv", "expected": "file_create"},
@@ -13,5 +13,23 @@
   "memory": {"text": "I prefer quiet workspaces", "query": "quiet workspaces"},
   "plan": {"prompt": "Draft a three-step plan for organizing a local project folder. Keep each step under 15 words. Return only three numbered steps.", "steps": 3, "max_words_exclusive": 15, "historical_filename": "fixture-first.csv"},
   "file_qa": {"filename": "fixture-notes.txt", "text": "The verification code is violet-42.", "prompt": "What is the verification code in the supplied notes? Answer briefly.", "expected": "violet-42"},
-  "poker_seed": 17
+  "poker_seed": 17,
+  "gmail_mime": {
+    "recipient": "Fixture client <fixture@example.invalid>",
+    "subject": "Īres dokumenta pārbaude",
+    "body": "Labdien!\n\nParaksta datums: 2026-10-04.\nĪres datums: 2026-11-16.\n\nAr cieņu,\nPixel Station",
+    "thread_id": "fixture-thread",
+    "message_id": "<fixture-message@example.invalid>",
+    "attachment_name": "fixture.txt",
+    "attachment_text": "Verification: violet-42\nĪre: 3 dienas\n"
+  },
+  "web_citations": {
+    "allowed_url": "https://fixture.example/facts?version=2",
+    "unobserved_url": "https://fixture.example/facts?version=1"
+  },
+  "observed_workflow": {
+    "queries": ["fixture current source", "fixture corroborating source"],
+    "observed_urls": ["https://fixture.example/observed-a", "https://fixture.example/observed-b"],
+    "invented_url": "https://fixture.example/invented-by-model"
+  }
 }

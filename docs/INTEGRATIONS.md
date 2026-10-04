@@ -2,6 +2,14 @@
 
 Pixel Station uses local Ollama for inference. Web search, image generation and Google access have separate providers. Unavailable providers return actionable setup messages. No integration uses a commercial LLM or paid search fallback. Configuring these services is independent of ordinary chat.
 
+## Offline OCR and vision
+
+Install the backend `documents` extra, then run `.venv\Scripts\python.exe scripts/setup_ocr.py` from the repository root. This explicitly downloads three pinned, SHA-256-verified RapidOCR ONNX weights into ignored `data/models/rapidocr`; private file parsing does not download models. `PIXEL_STATION_OCR_MODELS` can select another local weight directory. Missing dependencies, files or invalid checksums produce actual parse errors with setup guidance.
+
+Images use offline CPU OCR. PDFs first retain native text; only pages without meaningful native text are rendered for OCR. Workers allow one job, two CPU threads, a 90-second deadline including queue time, at most 20 scanned pages, 12 million rendered pixels per page and 100 million per job. Recognition can misread characters; extracted text is evidence for review rather than guaranteed transcription.
+
+Vision is independent of OCR. Assign an installed vision-capable Ollama model in Settings; on this machine `qwen3.5:2b` is assigned while LiquidAI remains the primary model. Image chat sends the actual image to the local vision model and can also retrieve its OCR excerpts. Lite keeps helper models transient and all inference shares the application queue. No cloud vision fallback is used.
+
 ## SearXNG
 
 The local search endpoint defaults to `http://127.0.0.1:8888`. This repository includes a single-service optional Compose configuration; JSON search is explicitly enabled. Search queries leave the machine through the upstream engines selected by SearXNG. Source fetches use public HTTP(S) webpages. [SearXNG search API](https://docs.searxng.org/dev/search_api.html).

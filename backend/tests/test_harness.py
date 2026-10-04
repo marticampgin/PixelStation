@@ -169,7 +169,7 @@ def test_legacy_default_zero_latency_is_unavailable_not_a_measured_sample(tmp_pa
 
 def test_versioned_deterministic_suite_uses_real_core_and_detects_injected_failure(monkeypatch):
     cases = deterministic_cases()
-    assert len(cases) == 7
+    assert len(cases) == 10
     assert {case["status"] for case in cases} == {"PASS"}
     from pixel_station import evaluations
 
@@ -189,7 +189,7 @@ def test_evaluation_api_is_persistent_isolated_and_native_is_explicit(tmp_path):
         assert started.status_code == 202
         result = wait_evaluation(client, started.json()["id"])
         assert result["status"] == "COMPLETE"
-        assert result["counts"] == {"PASS": 13, "SKIP": 8}
+        assert result["counts"] == {"PASS": 16, "SKIP": 8}
         assert result["native_requested"] is False
         assert result["poker_native_requested"] is False
         assert result["fixture"]["poker"]["version"] == "pixel-station-poker-strategy-v1"
@@ -271,7 +271,7 @@ def test_native_probe_is_manual_read_only_records_failure_and_freezes_configurat
         release.set()
         result = wait_evaluation(client, started_job["id"])
         assert result["outcome"] == "FAIL"
-        assert result["counts"] == {"PASS": 14, "FAIL": 1, "SKIP": 6}
+        assert result["counts"] == {"PASS": 17, "FAIL": 1, "SKIP": 6}
         assert "Created fixture-first.csv" not in json.dumps(result)
         assert result["configuration"]["retrieval_count"] == 4
         assert client.put("/api/settings", json=settings.model_dump()).status_code == 200

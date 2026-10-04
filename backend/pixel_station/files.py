@@ -209,30 +209,56 @@ class NativeFileParser:
 
 
 class DocumentParser:
-    """Docling normalizes office/PDF when installed; a visible native fallback stays usable."""
+    """Office normalization and offline OCR retain explicit setup/failure states."""
 
     def parse(self, path: Path, extension: str) -> tuple[list[dict], str, str | None]:
         native = NativeFileParser()
         if extension in IMAGE_EXTENSIONS:
-            return (
-                [],
-                "image",
-                "Text OCR is not enabled. Attach to a configured vision model for visual analysis.",
+            from .ocr import ocr_setup_error, parse_ocr
+
+            if problem := ocr_setup_error():
+                return [], "image", problem
+            parts = parse_ocr(path)
+            from PIL import Image
+
+            with Image.open(path) as image:
+                warning = (
+                    "OCR reads only the first image frame."
+                    if getattr(image, "n_frames", 1) > 1
+                    else None
+                )
+            if not any(part["text"].strip() for part in parts):
+                warning = "No readable text detected by local OCR. Use the vision model for visual analysis."
+            return parts, "rapidocr-cpu", warning
+        if extension == ".pdf":
+            from .ocr import ocr_setup_error, parse_ocr
+
+            parts = native.parse(path, extension)
+            scanned = [index for index, part in enumerate(parts) if not part["text"].strip()]
+            if not scanned:
+                return parts, "native-text-pdf", None
+            if problem := ocr_setup_error(pdf=True):
+                return (
+                    parts,
+                    "native",
+                    f"Pages without native text were not OCR processed. {problem}",
+                )
+            recognized = parse_ocr(path, scanned)
+            for part in recognized:
+                parts[part["page"] - 1] = part
+            warning = (
+                "Some PDF pages contain no readable text after local OCR."
+                if any(not part["text"].strip() for part in parts)
+                else None
             )
-        if extension in OFFICE or extension == ".pdf":
+            return parts, "native-and-rapidocr-cpu", warning
+        if extension in OFFICE:
             try:
                 from docling.document_converter import DocumentConverter
             except ImportError:
                 parts = native.parse(path, extension)
                 warning = "Native parser used. Install backend[documents] for Docling normalization and local OCR."
-                if extension == ".pdf" and not any(part["text"].strip() for part in parts):
-                    warning = "Scanned PDF has no extracted text. Install backend[documents] and enable local OCR."
                 return parts, "native", warning
-            # Avoid needless OCR for text PDFs and preserve explicit page provenance.
-            if extension == ".pdf":
-                parts = native.parse(path, extension)
-                if any(part["text"].strip() for part in parts):
-                    return parts, "native-text-pdf", None
             try:
                 converted = DocumentConverter().convert(path)
                 return (
