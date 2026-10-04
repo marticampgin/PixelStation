@@ -9,7 +9,7 @@
 - Explicit and automatically extracted memories, pinning, revisions, provenance, links, lexical/vector retrieval and persistent conversation compaction/indexing jobs.
 - Paperclip attachments, document parsing/chunk retrieval, deterministic TXT/MD/CSV/XLSX/DOCX/PDF generation and exact, expiring, single-use edit confirmation with preserved revisions.
 - Actual SearXNG/public-web research and ComfyUI workflow/job/library providers, including bounded research DAGs, SSRF-safe fetching, cancellation and retained cleanup outcomes.
-- Official Google OAuth/Gmail/Calendar providers, typed read/write operations, immutable confirmations for sends/Calendar changes, scope-aware setup and verified external write outcomes.
+- Official Google OAuth/Gmail/Calendar providers, typed read/write operations, immutable confirmations for sends/Calendar changes, scope-aware setup and post-write verification logic covered by isolated tests. Native Google verification is scoped below.
 - Deterministic 2–6 seat no-limit Hold'em with hidden-card isolation, legal betting, all-ins, side pots, hand evaluation, persistent tables and bounded local-model strategy decisions.
 - Local friction reports, regression candidates, idle persistent scheduling and consistent backups including nested databases and pending file replacements.
 - Custom dark navy/violet interface, separate desktop panel preferences, compact-screen drawers and real setup/error states for absent providers.
@@ -48,6 +48,15 @@
 ## Current verification scope
 
 - Local image profiles, native Web execution and connected Gmail search/read/local reply generation are verified within the documented samples. Search-snippet freshness remains a research quality risk. Saving Gmail drafts and sending messages await a concrete reviewed task; Calendar authorization is deferred by the owner.
+
+## Remaining coverage of the original specification
+
+- The implemented core workflows do not establish completion of every requirement in the original specification. Native verification and automated coverage remain distinct.
+- Uploaded-image OCR is not implemented: image attachments provide visual-model input, without parsed OCR text. A vision-capable model is currently unassigned. Scanned-PDF Docling conversion exists, but native OCR/vision checks remain pending and parsing-model availability has not been verified for those paths.
+- Complex chat planning is implemented for Web research. General observation-driven next-action execution (the specified bounded ReAct fallback) and mixed-domain complex plans are not implemented. The optional single critic pass does exist.
+- Gmail reply generation retrieves communication-style memories. A dedicated approved-email-template workflow is not implemented; saved Gmail draft creation and confirmed sending also remain unverified against the connected account.
+- File generation supports all six initial output formats. Editing has explicit limits: XLSX replaces first-sheet values as text; DOCX edits paragraphs without editing existing tables and resets inline formatting; PDF rebuilds from text without retaining original layout, images or annotations.
+- The watchtower records actual metrics, failures, feedback, reports and regression candidates. Passive reports currently group failures by event kind and provide predefined suggestions. Dedicated in-app Gmail draft-formatting, Calendar-interpretation and Web citation-quality gates are still absent; backend connector/validation tests are separate from these eval gaps.
 
 ## Blocked on account or system setup
 
