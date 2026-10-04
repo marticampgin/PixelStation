@@ -1,5 +1,5 @@
 import { ExternalLink, MessageSquare, Search } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { errorMessage, post, request } from '../../api/client';
 import { EmptyState, ErrorNotice, Loading } from '../../components/ui';
 import { useResource } from '../../hooks/useResource';
@@ -13,13 +13,24 @@ export function WebView({ station }: { station: Station }) {
   const [query, setQuery] = useState('');
   const [research, setResearch] = useState(false);
   const [sources, setSources] = useState<WebSource[]>([]);
+  const [hasSearched, setHasSearched] = useState(false);
+  const [searchedQuery, setSearchedQuery] = useState('');
   const [selected, setSelected] = useState<WebSource | null>(null);
   const [busy, setBusy] = useState(false);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [error, setError] = useState('');
+  const previewRequest = useRef<AbortController | null>(null);
+  useEffect(() => () => previewRequest.current?.abort(), []);
+  function cancelPreview() {
+    previewRequest.current?.abort();
+    previewRequest.current = null;
+    setPreviewBusy(false);
+  }
   async function search() {
     if (!query.trim()) return;
+    cancelPreview();
     setBusy(true);
+    setHasSearched(false);
     setError('');
     setSelected(null);
     try {
@@ -37,6 +48,8 @@ export function WebView({ station }: { station: Station }) {
         const result = await post<{ results: WebSource[] }>('/web/search', { query, limit: 10 });
         setSources(result.results);
       }
+      setSearchedQuery(query.trim());
+      setHasSearched(true);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -44,17 +57,28 @@ export function WebView({ station }: { station: Station }) {
     }
   }
   async function preview(source: WebSource) {
+    cancelPreview();
     setSelected(source);
-    if (source.text) return;
-    setPreviewBusy(true);
     setError('');
+    if (source.text !== undefined || source.fetch_error !== undefined) return;
+    const controller = new AbortController();
+    previewRequest.current = controller;
+    setPreviewBusy(true);
     try {
-      const result = await post<{ text: string; title: string }>('/web/fetch', { url: source.url });
+      const result = await post<{ text: string; title: string }>(
+        '/web/fetch',
+        { url: source.url },
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
       setSelected({ ...source, text: result.text, title: result.title || source.title });
     } catch (err) {
-      setError(errorMessage(err));
+      if (!controller.signal.aborted) setError(errorMessage(err));
     } finally {
-      setPreviewBusy(false);
+      if (previewRequest.current === controller) {
+        previewRequest.current = null;
+        setPreviewBusy(false);
+      }
     }
   }
   function sendToChat(items: WebSource[]) {
@@ -149,9 +173,10 @@ export function WebView({ station }: { station: Station }) {
                 {previewBusy ? (
                   <Loading text="Reading source…" />
                 ) : (
-                  <div className="article-text">
-                    {selected.text ?? selected.fetch_error ?? selected.snippet}
-                  </div>
+                  <>
+                    <ErrorNotice message={selected.fetch_error} />
+                    <div className="article-text">{selected.text || selected.snippet}</div>
+                  </>
                 )}
               </>
             ) : (
@@ -159,6 +184,11 @@ export function WebView({ station }: { station: Station }) {
             )}
           </div>
         </div>
+      ) : hasSearched ? (
+        <EmptyState title="No results found">
+          <p>No sources matched “{searchedQuery}”. Try broader terms or different wording.</p>
+          <p>Search coverage depends on the enabled SearXNG engines.</p>
+        </EmptyState>
       ) : (
         <EmptyState title="Search the web">
           Search results and source previews appear here.

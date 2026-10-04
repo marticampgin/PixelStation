@@ -1,7 +1,8 @@
 services:
   searxng:
-    image: docker.io/searxng/searxng:latest
+    image: docker.io/searxng/searxng@sha256:2ddcbc64e1b96cd4c73fce2e0ddd9351f0c405d3282bed7dcbc27a4905f0811e
     restart: unless-stopped
+    mem_limit: 512m
     ports:
       - "127.0.0.1:8888:8080"
     environment:

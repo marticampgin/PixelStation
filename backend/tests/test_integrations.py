@@ -97,13 +97,111 @@ async def test_search_json_dedup_and_query_boundary() -> None:
     assert [r["title"] for r in results] == ["First", "Other"]
 
 
+def test_web_search_api_reports_empty_results_with_actual_engine_failures(tmp_path: Path) -> None:
+    service = services(tmp_path)
+    service.web = WebProvider(
+        lambda: "http://127.0.0.1:8888", transport=httpx.MockTransport(lambda _: httpx.Response(200, json={
+            "results": [{"url": "file:///unusable", "title": "Not a web result"}],
+            "unresponsive_engines": [
+                ["brave", "Suspended: too many requests"], ["duckduckgo", "CAPTCHA"],
+                ["google cse", "Suspended: too many requests"],
+            ],
+        })),
+    )
+    app = FastAPI()
+    app.include_router(create_integrations_router(service))
+    with TestClient(app) as client:
+        response = client.post("/api/web/search", json={"query": "official documentation"})
+    assert response.status_code == 503
+    detail = response.json()["detail"]
+    assert detail["code"] == "search_engines_unavailable"
+    assert "upstream engine failures" in detail["message"]
+    assert "retrying" in detail["message"] and "configuration" in detail["message"]
+    assert detail["engine_failures"] == [
+        {"engine": "brave", "reason": "rate limited"}, {"engine": "duckduckgo", "reason": "CAPTCHA"},
+        {"engine": "google cse", "reason": "rate limited"},
+    ]
+
+
 @pytest.mark.asyncio
-async def test_missing_service_and_disabled_json_are_actionable() -> None:
+async def test_search_preserves_partial_usable_results_despite_engine_failures() -> None:
+    provider = WebProvider(
+        lambda: "http://127.0.0.1:8888", transport=httpx.MockTransport(lambda _: httpx.Response(200, json={
+            "results": [{"url": "https://example.com/source?utm_source=test", "title": "Actual source"}],
+            "unresponsive_engines": [["brave", "too many requests"], ["duckduckgo", "CAPTCHA"]],
+        })),
+    )
+    results = await provider.search("official documentation")
+    assert results == [{"url": "https://example.com/source", "title": "Actual source", "snippet": "", "engine": ""}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_fields", [
+    {}, {"unresponsive_engines": []},
+    {"unresponsive_engines": [[], ["brave", ""], ["duckduckgo", None], "invalid"]},
+])
+async def test_search_keeps_genuine_empty_results_without_reported_failures(failure_fields: dict) -> None:
+    provider = WebProvider(
+        lambda: "http://127.0.0.1:8888", transport=httpx.MockTransport(lambda _: httpx.Response(
+            200, json={"results": [], **failure_fields})),
+    )
+    assert await provider.search("query with no matches") == []
+
+
+@pytest.mark.asyncio
+async def test_search_engine_failure_details_are_bounded_and_do_not_echo_exception_text() -> None:
+    private = "https://private.example/query?token=private-token"
+    failures = [[private, f"Unexpected response with {private}"],
+                ["engine\r\nInjected: field", "Unrecognized exception containing private query"]]
+    failures += [[f"engine{i}", "timeout"] for i in range(12)]
+    provider = WebProvider(
+        lambda: "http://127.0.0.1:8888", transport=httpx.MockTransport(lambda _: httpx.Response(
+            200, json={"results": [], "unresponsive_engines": failures})),
+    )
+    with pytest.raises(IntegrationError) as caught:
+        await provider.search("private query")
+    details = caught.value.details["engine_failures"]
+    assert len(details) == 8
+    assert details[0] == {"engine": "configured engine", "reason": "unresponsive"}
+    assert all(len(item["engine"]) <= 64 for item in details)
+    serialized = str(caught.value) + json.dumps(caught.value.details)
+    assert private not in serialized and "private-token" not in serialized
+    assert "private query" not in serialized and "Injected" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_missing_search_service_is_actionable() -> None:
     with pytest.raises(IntegrationError, match="Configure SearXNG"):
         await WebProvider(lambda: "").search("test")
-    provider = WebProvider(lambda: "http://127.0.0.1:8888", transport=httpx.MockTransport(lambda _: httpx.Response(403)))
-    with pytest.raises(IntegrationError, match="JSON search is disabled"):
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refusal", ["JSON format disabled", "Proxy access denied"])
+async def test_connection_status_needs_actual_search_and_refusal_does_not_invent_cause(refusal: str) -> None:
+    calls = []
+
+    def serve(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path))
+        if request.url.path == "/config":
+            return httpx.Response(200, json={"instance_name": "Test SearXNG"})
+        assert request.url.params["format"] == "json"
+        return httpx.Response(403, text=refusal)
+
+    provider = WebProvider(lambda: "http://127.0.0.1:8888", transport=httpx.MockTransport(serve))
+    status = await provider.status()
+    assert status["available"] is True
+    assert calls == [("GET", "/config")], "Connection checks must not send search queries"
+    assert "Web workspace" in status["message"] and "run a search" in status["message"]
+    assert "Test search" not in status["message"]
+
+    with pytest.raises(IntegrationError, match="refused the JSON search request") as caught:
         await provider.search("test")
+    assert caught.value.code == "search_forbidden"
+    assert caught.value.status == 503
+    assert "HTTP 403" in str(caught.value)
+    assert "search.formats" in str(caught.value) and "access restrictions" in str(caught.value)
+    assert "is disabled" not in str(caught.value)
+    assert calls == [("GET", "/config"), ("GET", "/search")]
 
 
 @pytest.mark.asyncio
@@ -144,6 +242,53 @@ async def test_web_content_extraction_and_download_limits() -> None:
         lambda _: httpx.Response(200, headers={"content-type": "text/plain", "content-length": "3000000"}, text="too large")))
     with pytest.raises(IntegrationError, match="2 MB"):
         await oversized.fetch("https://example.com")
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_keeps_document_title_and_prefers_article_over_site_navigation() -> None:
+    html = """<html><head><title>Search API — SearXNG</title></head><body>
+        <svg><title>Contents Menu Expand</title></svg>
+        <header>Site branding</header><aside>Sidebar links</aside>
+        <main><p>Main layout chrome</p><nav>Table of contents</nav>
+          <article><h1>Search API</h1><p>Request JSON with format=json.</p>
+            <svg><title>Light mode Dark mode</title></svg><button>Copy Menu</button>
+            <aside>Article sidebar</aside><p>Search accepts GET and POST.</p>
+          </article><footer>Footer links</footer>
+        </main></body></html>"""
+    provider = WebProvider(
+        lambda: "", resolver=lambda *_: ["93.184.216.34"],
+        transport=httpx.MockTransport(lambda _: httpx.Response(
+            200, headers={"content-type": "text/html; charset=utf-8"}, text=html)),
+    )
+    page = await provider.fetch("https://example.com/search-api")
+    assert page["title"] == "Search API — SearXNG"
+    assert "Request JSON with format=json." in page["text"]
+    assert "Search accepts GET and POST." in page["text"]
+    for excluded in ("Contents Menu", "Site branding", "Sidebar links", "Main layout chrome",
+                     "Table of contents", "Light mode", "Copy Menu", "Article sidebar", "Footer links"):
+        assert excluded not in page["text"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("html,title,excluded", [
+    ("<head><title>Main page</title></head><body>Outside main"
+     "<main><article> </article><p>Actual evidence</p></main></body>", "Main page", "Outside main"),
+    ("<html><head><title>Simple page</title></head><body><aside>Sidebar links</aside>"
+     "<p>Actual evidence</p><nav>Menu links</nav></body></html>", "Simple page", "Sidebar links"),
+    ("<title>Headless page</title><svg><title>Icon title</title></svg>"
+     "<p>Actual evidence</p>", "Headless page", "Icon title"),
+])
+async def test_web_fetch_uses_nonempty_main_or_plain_body_fallback(html: str, title: str, excluded: str) -> None:
+    provider = WebProvider(
+        lambda: "", resolver=lambda *_: ["93.184.216.34"],
+        transport=httpx.MockTransport(lambda _: httpx.Response(
+            200, headers={"content-type": "text/html; charset=utf-8"}, text=html)),
+    )
+    page = await provider.fetch("https://example.com/source")
+    assert page["title"] == title
+    assert "Actual evidence" in page["text"]
+    assert excluded not in page["text"]
+    assert "Menu links" not in page["text"]
 
 
 @pytest.mark.asyncio

@@ -38,38 +38,107 @@ def canonical_url(value: str) -> str:
     return urlunsplit((p.scheme.lower(), p.netloc.lower(), p.path or "/", urlencode(query), ""))
 
 
+def _engine_failures(value: Any) -> list[dict[str, str]]:
+    """Describe reported failures without exposing upstream exceptions or URLs."""
+    if not isinstance(value, list):
+        return []
+    failures: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        engine, failure = item[:2]
+        if not isinstance(engine, str) or not isinstance(failure, str) or not engine.strip() or not failure.strip():
+            continue
+        engine = engine.strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._()+-]{0,63}", engine):
+            engine = "configured engine"
+        reported = failure.lower()
+        if "captcha" in reported:
+            reason = "CAPTCHA"
+        elif any(term in reported for term in ("too many requests", "rate limit", "429")):
+            reason = "rate limited"
+        elif any(term in reported for term in ("timeout", "timed out")):
+            reason = "timeout"
+        elif any(term in reported for term in ("forbidden", "access denied", "403")):
+            reason = "access refused"
+        elif "suspended" in reported:
+            reason = "suspended"
+        else:
+            reason = "unresponsive"
+        entry = {"engine": engine, "reason": reason}
+        if entry not in failures:
+            failures.append(entry)
+        if len(failures) == 8:
+            break
+    return failures
+
+
 class ReadableHTML(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.skip = 0
+        self.head_depth = 0
+        self.main_depth = 0
+        self.article_depth = 0
+        self.body_started = False
+        self.document_title_seen = False
         self.title_depth = 0
         self.parts: list[str] = []
+        self.main_parts: list[str] = []
+        self.article_parts: list[str] = []
         self.title: list[str] = []
 
+    def append_text(self, text: str) -> None:
+        self.parts.append(text)
+        if self.main_depth:
+            self.main_parts.append(text)
+        if self.article_depth:
+            self.article_parts.append(text)
+
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in {"script", "style", "noscript", "svg", "nav", "footer"}:
+        if tag == "head":
+            self.head_depth += 1
+        if tag in {"body", "main", "article"}:
+            self.body_started = True
+        if tag == "main":
+            self.main_depth += 1
+        if tag == "article":
+            self.article_depth += 1
+        if tag in {"script", "style", "noscript", "svg", "nav", "footer", "aside", "button"}:
             self.skip += 1
-        if tag == "title":
+        if tag == "title" and not self.skip and not self.document_title_seen and (self.head_depth or not self.body_started):
             self.title_depth += 1
-        if tag in {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "section", "article"}:
-            self.parts.append("\n")
+            self.document_title_seen = True
+        if not self.skip and not self.head_depth and tag in {"p", "div", "br", "li", "tr", "h1", "h2", "h3", "h4", "section", "article", "main"}:
+            self.append_text("\n")
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in {"script", "style", "noscript", "svg", "nav", "footer"} and self.skip:
-            self.skip -= 1
-        if tag == "title" and self.title_depth:
+        if tag == "title" and self.title_depth and not self.skip:
             self.title_depth -= 1
+        if tag == "head" and self.head_depth:
+            self.head_depth -= 1
+        if tag == "main" and self.main_depth:
+            self.main_depth -= 1
+        if tag == "article" and self.article_depth:
+            self.article_depth -= 1
+        if tag in {"script", "style", "noscript", "svg", "nav", "footer", "aside", "button"} and self.skip:
+            self.skip -= 1
 
     def handle_data(self, data: str) -> None:
+        if self.skip:
+            return
         if self.title_depth:
             self.title.append(data)
-        elif not self.skip:
-            self.parts.append(data)
+        elif not self.head_depth:
+            self.append_text(data)
 
     def result(self) -> tuple[str, str]:
-        body = re.sub(r"[ \t\r\f\v]+", " ", "".join(self.parts))
-        body = re.sub(r"\n\s*\n+", "\n\n", body).strip()
-        return " ".join(self.title).strip(), body
+        for parts in (self.article_parts, self.main_parts, self.parts):
+            body = re.sub(r"[ \t\r\f\v]+", " ", "".join(parts))
+            body = re.sub(r"\n\s*\n+", "\n\n", body).strip()
+            if body:
+                return " ".join(self.title).strip(), body
+        return " ".join(self.title).strip(), ""
 
 
 class WebProvider:
@@ -88,7 +157,7 @@ class WebProvider:
             async with httpx.AsyncClient(timeout=5, transport=self.transport, trust_env=False) as client:
                 response = await client.get(endpoint_url(url) + "/config")
                 response.raise_for_status()
-            return {"available": True, "endpoint": url, "message": "SearXNG responds. Use Test search to verify enabled JSON search."}
+            return {"available": True, "endpoint": url, "message": "SearXNG responds. Open the Web workspace and run a search to verify JSON results and upstream engines."}
         except (httpx.HTTPError, IntegrationError):
             return {"available": False, "endpoint": url, "message": "SearXNG is unavailable. Start the optional Compose service and enable JSON search."}
 
@@ -108,7 +177,7 @@ class WebProvider:
             async with httpx.AsyncClient(timeout=httpx.Timeout(20, connect=5), transport=self.transport, trust_env=False) as client:
                 async with client.stream("GET", endpoint_url(self.endpoint()) + "/search", params={"q": query, "format": "json"}) as response:
                     if response.status_code == 403:
-                        raise IntegrationError("SearXNG JSON search is disabled. Add json to search.formats in settings.yml.", "json_disabled")
+                        raise IntegrationError("SearXNG refused the JSON search request (HTTP 403). Check that json is enabled in search.formats in settings.yml and review instance or proxy access restrictions.", "search_forbidden")
                     response.raise_for_status()
                     raw = bytearray()
                     async for chunk in response.aiter_bytes():
@@ -140,6 +209,15 @@ class WebProvider:
                             "snippet": str(item.get("content", ""))[:2500], "engine": item.get("engine", "")})
             if len(results) >= min(max(limit, 1), 20):
                 break
+        if not results:
+            failures = _engine_failures(payload.get("unresponsive_engines"))
+            if failures:
+                raise IntegrationError(
+                    "SearXNG returned no usable results and reported upstream engine failures. "
+                    "Wait before retrying, or review enabled engines and their access/rate-limit status "
+                    "in the SearXNG configuration.",
+                    "search_engines_unavailable", details={"engine_failures": failures},
+                )
         return results
 
     async def _public_target(self, url: str) -> tuple[str, str, str]:

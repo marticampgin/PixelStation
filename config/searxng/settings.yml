@@ -12,3 +12,8 @@ server:
   image_proxy: false
 outgoing:
   request_timeout: 8.0
+engines:
+  # Independent free index when the default web engines are unavailable.
+  # Its index is smaller and does not support safe-search filtering.
+  - name: mwmbl
+    disabled: false

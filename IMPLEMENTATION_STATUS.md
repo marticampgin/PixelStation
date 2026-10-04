@@ -39,14 +39,16 @@
 - SDXL is the saved quality default on this installation and survived an app restart. A real chat request used the bound 1024 × 1024 graph defaults and returned a saved PNG; its scale/placement defect is recorded separately from execution success. Omitted API/chat dimensions honor validated workflow defaults, explicit structured dimensions remain intact, and image chat/tool deadlines include bounded provider cleanup. Saved Studio form sizes remain tied to their prior image when the global default changes.
 - The right context panel uses distinct neighboring forest/lakeshore artwork. LiquidAI labels identify Ollama, HF import and the local alias; model-selector tooltips expose exact IDs. Real Chrome selections, both landscape URLs, mobile drawers and a clean final console were checked.
 
+- Installed official Docker Desktop 4.93.0 after the full Windows Restart completed WSL servicing. Native SearXNG 2026.10.4-44b98e610 runs on loopback with an inspected pinned image digest and a 512 MiB container cap. Real searches, safe source fetches and a four-step research DAG returned official SearXNG sources. Readable extraction now favors article/main content and excludes SVG labels and navigation. Web previews reject stale responses; empty results and reported upstream failures have distinct states. Isolated verification for this increment passed 375 backend and 81 frontend tests plus Ruff, mypy and frontend type/lint/build checks.
+
 ## Currently working
 
-- Image generation and quality profiles are verified locally. Web research setup is in progress, followed by Gmail/Calendar. WSL is installed; a full Windows Restart must complete pending virtualization-platform installation before Docker/SearXNG can run. Personal Google OAuth remains an owner step.
+- Image generation and quality profiles are verified locally. Native model-planned Web research is being checked, including explicit research requests with attached sources. Gmail and Calendar are being separated so each can use a different Google account. Personal Google OAuth remains an owner step.
 
 ## Blocked on account or system setup
 
 - **Core application:** no installation blocker remains on this machine.
-- **Web research:** SearXNG is not installed/running. On 2026-10-04, WSL 3.0.1 was installed and Virtual Machine Platform was enabled, but Windows servicing still had its compute-service installation pending after a Fast Startup/hybrid boot. The hypervisor was already running; these observations do not justify a BIOS change. Choose Start → Power → Restart and let Windows finish updates, then recheck WSL before continuing. Official Docker Desktop 4.93.0 is downloaded under ignored `.tools`, with a valid Docker Inc signature and a matching official SHA-256; it has not been installed or launched. Search, source fetches and model-planned research remain unverified against live SearXNG.
+- **Web research:** no installation blocker remains. Actual Brave/DuckDuckGo/Google CSE rate limits or CAPTCHAs interrupted some searches; Mwmbl returned additional real sources after being enabled. Live search/fetch and provider DAG execution are verified; model planning and answer quality remain under native QA. The 8 GB RAM machine showed memory pressure with Docker and Ollama running together; the container cap does not cap WSL host overhead.
 - **Google:** Cloud project/OAuth credentials, personal login and consent require the owner. Live Gmail/Calendar account operations remain unverified; provider and approval behavior are covered with isolated tests.
 - A vision model is optional and currently unassigned. Scanned-document/OCR fallback may need first-use parsing model downloads.
 

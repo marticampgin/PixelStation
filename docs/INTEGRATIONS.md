@@ -11,8 +11,13 @@ On Windows, install Docker Desktop with a working Linux-container backend first.
 Once Docker is running, execute from the repository root:
 
 ```powershell
-$searchSecret = [guid]::NewGuid().ToString('N') + [guid]::NewGuid().ToString('N')
-[IO.File]::WriteAllText((Join-Path (Get-Location) 'config/.env'), "SEARXNG_SECRET=$searchSecret`n")
+if (-not (Test-Path -LiteralPath 'config/.env')) {
+    $searchBytes = New-Object byte[] 32
+    $searchRandom = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $searchRandom.GetBytes($searchBytes) } finally { $searchRandom.Dispose() }
+    $searchSecret = [BitConverter]::ToString($searchBytes).Replace('-', '').ToLowerInvariant()
+    [IO.File]::WriteAllText((Join-Path (Get-Location) 'config/.env'), "SEARXNG_SECRET=$searchSecret`n")
+}
 docker compose --env-file config/.env -f config/docker-compose.optional.yml up -d
 ```
 
@@ -23,9 +28,11 @@ docker compose --env-file config/.env -f config/docker-compose.optional.yml logs
 docker compose --env-file config/.env -f config/docker-compose.optional.yml down
 ```
 
-For updates, review the upstream image changes and pull deliberately; this example uses the official `latest` image. Pin an inspected image digest if you need reproducible deployment. A Docker installation is unnecessary if a SearXNG endpoint is already running elsewhere. [Official container installation](https://docs.searxng.org/admin/installation-docker.html).
+The Compose file pins the inspected official SearXNG image digest and limits the container to 512 MiB. That cap excludes Docker/WSL host overhead. Review upstream changes and update the digest deliberately. A Docker installation is unnecessary if a SearXNG endpoint is already running elsewhere. [Official container installation](https://docs.searxng.org/admin/installation-docker.html).
 
-A 403 from search usually means JSON is absent from `search.formats`. Connection refused means SearXNG is not started or its endpoint is wrong. Search-engine CAPTCHAs or rate limits can produce no results even when the service is healthy.
+A 403 means the request was refused; check JSON in `search.formats` and instance/proxy restrictions. Connection refused means SearXNG is not started or its endpoint is wrong. Search-engine CAPTCHAs or rate limits can produce no results even when the service is healthy. When a search has no usable results and SearXNG reports engine failures, Pixel Station surfaces those failures separately from a successful empty search. Partial results remain usable.
+
+The supplied settings supplement the default engines with Mwmbl's independent free index. Its smaller index may miss pages or restrictive queries and does not support safe-search filtering. It improves coverage in the observed upstream-outage case without guaranteeing availability. [Mwmbl engine documentation](https://docs.searxng.org/dev/engines/online/mwmbl.html).
 
 Pixel Station limits searches to 20 results, research to four queries and six fetched pages, fetch downloads to 2 MB and total fetch time to 30 seconds. Redirects are revalidated. The resolved public address is pinned for the actual connection; private/reserved/local-network addresses, file URLs, credentials in URLs and nonstandard ports are rejected. HTML text is extracted locally; JavaScript-only pages return an explanation and can be opened in a browser. The current provider does not enable a Playwright fallback.
 
