@@ -3,7 +3,15 @@ import type { Approval, GeneratedImage, LocalFile, Message } from '../../types';
 import { ApprovalCard } from '../google/ApprovalCard';
 import { FileEditCard, type FileEditProposal } from '../files/FileEditCard';
 
+function sourceUrlKey(url: string) {
+  try {
+    return new URL(url).href;
+  } catch {
+    return url.trim();
+  }
+}
 export function TraceArtifacts({ message }: { message: Message }) {
+  const sourceUrls = new Set<string>();
   return (
     <>
       {message.traces?.map((trace, index) => {
@@ -16,8 +24,15 @@ export function TraceArtifacts({ message }: { message: Message }) {
               file_edit?: FileEditProposal;
             }
           | undefined;
-        const sources =
-          (trace.web_sources as { url: string; title?: string }[] | undefined) ?? result?.sources;
+        const sources = [
+          ...((trace.web_sources as { url: string; title?: string }[] | undefined) ?? []),
+          ...(result?.sources ?? []),
+        ].filter((source) => {
+          const key = sourceUrlKey(source.url);
+          if (sourceUrls.has(key)) return false;
+          sourceUrls.add(key);
+          return true;
+        });
         const file = trace.file as LocalFile | undefined;
         return (
           <div className="trace-artifacts" key={index}>
