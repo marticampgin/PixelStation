@@ -105,6 +105,8 @@ Tests use isolated temporary data and mocked external providers. Normal applicat
 
 ## Extending the application
 
+For a complete explanation of the running system, read [Know Your Pixel Station](docs/KNOW_YOUR_APPLICATION.md) and its [parameter reference](docs/APPLICATION_REFERENCE.md). The [sanitized inventory](docs/APPLICATION_INVENTORY.json) records exact source declarations, hashes, model identities, dependencies and workflow settings. `scripts/build_application_guide.py` combines the guide and appendix into a Word document with diagrams; run it with a Python environment containing `python-docx` and Pillow. The generated guide goes to ignored `data/exports` by default.
+
 - Add a **provider** behind the protocols in `backend/pixel_station/providers`; keep endpoint/model-specific behavior out of orchestration.
 - Register a **tool** with an input schema, permission class, timeout and provider requirement. Expose only relevant tools for a routed task. External/destructive actions need application approval, irrespective of what a model asks for.
 - Add a **parser or writer** behind the file interfaces, with content/size/path checks and deterministic output validation.

@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="720" viewBox="0 0 1800 720">
+<rect width="100%" height="100%" fill="white"/>
+<defs><marker id="a" markerWidth="12" markerHeight="12" refX="9" refY="5" orient="auto"><path d="M0 0 L10 5 L0 10" fill="#6351A5"/></marker></defs>
+<polyline points="575,190 650,190" fill="none" stroke="#6351A5" stroke-width="5" marker-end="url(#a)"/>
+<polyline points="1150,190 1225,190" fill="none" stroke="#6351A5" stroke-width="5" marker-end="url(#a)"/>
+<polyline points="1475,305 1475,415" fill="none" stroke="#6351A5" stroke-width="5" marker-end="url(#a)"/>
+<polyline points="1225,530 1150,530" fill="none" stroke="#6351A5" stroke-width="5" marker-end="url(#a)"/>
+<polyline points="650,530 575,530" fill="none" stroke="#6351A5" stroke-width="5" marker-end="url(#a)"/>
+<rect x="75" y="75" width="500" height="230" rx="14" fill="#F3F5FB" stroke="#D9D9D9" stroke-width="3"/>
+<text x="100" y="140" font-family="Segoe UI,Arial,sans-serif" font-size="38" font-weight="bold" fill="#172844">Upload or copy</text>
+<text x="100" y="204" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Immutable byte fingerprint</text>
+<text x="100" y="252" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Independent named record</text>
+<rect x="650" y="75" width="500" height="230" rx="14" fill="#F3F5FB" stroke="#D9D9D9" stroke-width="3"/>
+<text x="675" y="140" font-family="Segoe UI,Arial,sans-serif" font-size="38" font-weight="bold" fill="#172844">Parse and index</text>
+<text x="675" y="204" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Local format readers</text>
+<text x="675" y="252" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Offline OCR when needed</text>
+<rect x="1225" y="75" width="500" height="230" rx="14" fill="#F3F5FB" stroke="#D9D9D9" stroke-width="3"/>
+<text x="1250" y="140" font-family="Segoe UI,Arial,sans-serif" font-size="38" font-weight="bold" fill="#172844">Retrieve or propose</text>
+<text x="1250" y="204" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Cited excerpts</text>
+<text x="1250" y="252" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Exact reviewed replacement</text>
+<rect x="1225" y="415" width="500" height="230" rx="14" fill="#F3F5FB" stroke="#D9D9D9" stroke-width="3"/>
+<text x="1250" y="480" font-family="Segoe UI,Arial,sans-serif" font-size="38" font-weight="bold" fill="#172844">Inspect preview</text>
+<text x="1250" y="544" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Original hash and changes</text>
+<text x="1250" y="592" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Expiry and permission</text>
+<rect x="650" y="415" width="500" height="230" rx="14" fill="#F3F5FB" stroke="#D9D9D9" stroke-width="3"/>
+<text x="675" y="480" font-family="Segoe UI,Arial,sans-serif" font-size="38" font-weight="bold" fill="#172844">Confirm once</text>
+<text x="675" y="544" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Verify reviewed bytes</text>
+<text x="675" y="592" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Preserve prior revision</text>
+<rect x="75" y="415" width="500" height="230" rx="14" fill="#F3F5FB" stroke="#D9D9D9" stroke-width="3"/>
+<text x="100" y="480" font-family="Segoe UI,Arial,sans-serif" font-size="38" font-weight="bold" fill="#172844">Updated library copy</text>
+<text x="100" y="544" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Reparse and reindex</text>
+<text x="100" y="592" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Host original untouched</text>
+</svg>

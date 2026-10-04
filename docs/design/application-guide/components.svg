@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1400" viewBox="0 0 1800 1400">
+<rect width="100%" height="100%" fill="white"/>
+<defs><marker id="a" markerWidth="12" markerHeight="12" refX="9" refY="5" orient="auto"><path d="M0 0 L10 5 L0 10" fill="#6351A5"/></marker></defs>
+<polyline points="900,305 900,415" fill="none" stroke="#6351A5" stroke-width="5" marker-end="url(#a)"/>
+<polyline points="900,645 325,755" fill="none" stroke="#6351A5" stroke-width="5" marker-end="url(#a)"/>
+<polyline points="900,645 900,755" fill="none" stroke="#6351A5" stroke-width="5" marker-end="url(#a)"/>
+<polyline points="900,645 1475,755" fill="none" stroke="#6351A5" stroke-width="5" marker-end="url(#a)"/>
+<polyline points="650,530 30,530 30,1210 75,1210" fill="none" stroke="#6351A5" stroke-width="5" marker-end="url(#a)"/>
+<polyline points="1150,530 1770,530 1770,1210 1725,1210" fill="none" stroke="#6351A5" stroke-width="5" marker-end="url(#a)"/>
+<rect x="650" y="75" width="500" height="230" rx="14" fill="#F3F5FB" stroke="#D9D9D9" stroke-width="3"/>
+<text x="675" y="140" font-family="Segoe UI,Arial,sans-serif" font-size="38" font-weight="bold" fill="#172844">Browser interface</text>
+<text x="675" y="204" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">React and TypeScript</text>
+<text x="675" y="252" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Port 5173</text>
+<rect x="650" y="415" width="500" height="230" rx="14" fill="#F3F5FB" stroke="#D9D9D9" stroke-width="3"/>
+<text x="675" y="480" font-family="Segoe UI,Arial,sans-serif" font-size="38" font-weight="bold" fill="#172844">Application code</text>
+<text x="675" y="544" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Routes and permissions</text>
+<text x="675" y="592" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Python at port 8000</text>
+<rect x="75" y="755" width="500" height="230" rx="14" fill="#F3F5FB" stroke="#D9D9D9" stroke-width="3"/>
+<text x="100" y="820" font-family="Segoe UI,Arial,sans-serif" font-size="38" font-weight="bold" fill="#172844">Local model runtime</text>
+<text x="100" y="884" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Ollama at 11434</text>
+<text x="100" y="932" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Text vision embeddings</text>
+<rect x="650" y="755" width="500" height="230" rx="14" fill="#F3F5FB" stroke="#D9D9D9" stroke-width="3"/>
+<text x="675" y="820" font-family="Segoe UI,Arial,sans-serif" font-size="38" font-weight="bold" fill="#172844">Local saved data</text>
+<text x="675" y="884" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">SQLite files revisions</text>
+<text x="675" y="932" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Memory runs and jobs</text>
+<rect x="1225" y="755" width="500" height="230" rx="14" fill="#F3F5FB" stroke="#D9D9D9" stroke-width="3"/>
+<text x="1250" y="820" font-family="Segoe UI,Arial,sans-serif" font-size="38" font-weight="bold" fill="#172844">Local image runtime</text>
+<text x="1250" y="884" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">ComfyUI at 8188</text>
+<text x="1250" y="932" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Saved image graph</text>
+<rect x="75" y="1095" width="500" height="230" rx="14" fill="#F3F5FB" stroke="#D9D9D9" stroke-width="3"/>
+<text x="100" y="1160" font-family="Segoe UI,Arial,sans-serif" font-size="38" font-weight="bold" fill="#172844">Web research</text>
+<text x="100" y="1224" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">SearXNG at 8888</text>
+<text x="100" y="1272" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Internet search and pages</text>
+<rect x="1225" y="1095" width="500" height="230" rx="14" fill="#F3F5FB" stroke="#D9D9D9" stroke-width="3"/>
+<text x="1250" y="1160" font-family="Segoe UI,Arial,sans-serif" font-size="38" font-weight="bold" fill="#172844">Google services</text>
+<text x="1250" y="1224" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Authorized Gmail</text>
+<text x="1250" y="1272" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Separate Calendar account</text>
+</svg>

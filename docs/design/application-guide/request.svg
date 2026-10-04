@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="720" viewBox="0 0 1800 720">
+<rect width="100%" height="100%" fill="white"/>
+<defs><marker id="a" markerWidth="12" markerHeight="12" refX="9" refY="5" orient="auto"><path d="M0 0 L10 5 L0 10" fill="#6351A5"/></marker></defs>
+<polyline points="575,190 650,190" fill="none" stroke="#6351A5" stroke-width="5" marker-end="url(#a)"/>
+<polyline points="1150,190 1225,190" fill="none" stroke="#6351A5" stroke-width="5" marker-end="url(#a)"/>
+<polyline points="1475,305 1475,415" fill="none" stroke="#6351A5" stroke-width="5" marker-end="url(#a)"/>
+<polyline points="1225,530 1150,530" fill="none" stroke="#6351A5" stroke-width="5" marker-end="url(#a)"/>
+<polyline points="650,530 575,530" fill="none" stroke="#6351A5" stroke-width="5" marker-end="url(#a)"/>
+<rect x="75" y="75" width="500" height="230" rx="14" fill="#F3F5FB" stroke="#D9D9D9" stroke-width="3"/>
+<text x="100" y="140" font-family="Segoe UI,Arial,sans-serif" font-size="38" font-weight="bold" fill="#172844">Save request</text>
+<text x="100" y="204" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Message and run record</text>
+<rect x="650" y="75" width="500" height="230" rx="14" fill="#F3F5FB" stroke="#D9D9D9" stroke-width="3"/>
+<text x="675" y="140" font-family="Segoe UI,Arial,sans-serif" font-size="38" font-weight="bold" fill="#172844">Choose workflow</text>
+<text x="675" y="204" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Rules first</text>
+<text x="675" y="252" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Classifier if ambiguous</text>
+<rect x="1225" y="75" width="500" height="230" rx="14" fill="#F3F5FB" stroke="#D9D9D9" stroke-width="3"/>
+<text x="1250" y="140" font-family="Segoe UI,Arial,sans-serif" font-size="38" font-weight="bold" fill="#172844">Gather evidence</text>
+<text x="1250" y="204" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Relevant memory files</text>
+<text x="1250" y="252" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Selected sources</text>
+<rect x="1225" y="415" width="500" height="230" rx="14" fill="#F3F5FB" stroke="#D9D9D9" stroke-width="3"/>
+<text x="1250" y="480" font-family="Segoe UI,Arial,sans-serif" font-size="38" font-weight="bold" fill="#172844">Execute tools</text>
+<text x="1250" y="544" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Validated arguments</text>
+<text x="1250" y="592" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Bounded permissions</text>
+<rect x="650" y="415" width="500" height="230" rx="14" fill="#F3F5FB" stroke="#D9D9D9" stroke-width="3"/>
+<text x="675" y="480" font-family="Segoe UI,Arial,sans-serif" font-size="38" font-weight="bold" fill="#172844">Answer and validate</text>
+<text x="675" y="544" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Public text only</text>
+<text x="675" y="592" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">One bounded repair</text>
+<rect x="75" y="415" width="500" height="230" rx="14" fill="#F3F5FB" stroke="#D9D9D9" stroke-width="3"/>
+<text x="100" y="480" font-family="Segoe UI,Arial,sans-serif" font-size="38" font-weight="bold" fill="#172844">Stream and persist</text>
+<text x="100" y="544" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Text progress artifacts</text>
+<text x="100" y="592" font-family="Segoe UI,Arial,sans-serif" font-size="35" fill="#172844">Outcome and measurements</text>
+</svg>
