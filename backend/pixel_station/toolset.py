@@ -100,15 +100,29 @@ def build_tools(app) -> ToolRegistry:
         return await services.google.events(calendar_id, time_min, time_max, query)
 
     async def update_calendar(calendar_id, event, event_id):
-        return await services.google.mutate_event(
-            "calendar_update", calendar_id, event_id=event_id, event=event
-        )
+        return await services.propose_action("calendar_update", {
+            "calendar_id": calendar_id, "event_id": event_id, "event": event,
+        })
 
     async def create_calendar(calendar_id, event):
-        return await services.google.mutate_event("calendar_create", calendar_id, event=event)
+        return await services.propose_action("calendar_create", {
+            "calendar_id": calendar_id, "event": event,
+        })
 
     async def delete_calendar(calendar_id, event_id):
-        return await services.google.mutate_event("calendar_delete", calendar_id, event_id=event_id)
+        return await services.propose_action("calendar_delete", {
+            "calendar_id": calendar_id, "event_id": event_id,
+        })
+
+    async def create_draft(**kwargs):
+        return await services.create_gmail_draft(EmailInput.model_validate(kwargs).model_dump())
+
+    async def propose_send(**kwargs):
+        # Registry permission approval is not a concrete account/payload-bound
+        # send review. Only the dedicated confirmation service performs a send.
+        return await services.propose_action(
+            "gmail_send", EmailInput.model_validate(kwargs).model_dump()
+        )
 
     async def read_thread(thread_id):
         return await services.google.thread(thread_id)
@@ -125,9 +139,9 @@ def build_tools(app) -> ToolRegistry:
     register("file_create", "files", FileCreate, create_file, "local_reversible", 120)
     register("gmail_search", "google", Query, services.google.threads)
     register("gmail_read", "google", ThreadQuery, read_thread)
-    register("gmail_draft", "google", EmailInput, services.google.create_draft, "local_reversible")
+    register("gmail_draft", "google", EmailInput, create_draft, "local_reversible")
     register(
-        "gmail_send", "google", EmailInput, services.google.send_email, "external_or_destructive"
+        "gmail_send", "google", EmailInput, propose_send, "external_or_destructive"
     )
     register("calendar_read", "google", AgendaQuery, read_calendar)
     register("calendar_create", "google", EventInput, create_calendar, "external_or_destructive")

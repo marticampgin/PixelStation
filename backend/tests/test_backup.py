@@ -55,3 +55,16 @@ def test_backup_preserves_pending_validated_file_edit(tmp_path):
         assert client.get(
             f"/api/files/{uploaded['id']}/revisions/{revisions[0]['id']}/content"
         ).content == b"Original revision"
+
+
+def test_backup_preserves_reviewed_mail_bytes_without_connector_credentials(tmp_path):
+    connector = tmp_path / "connectors" / "google"
+    snapshots = connector / "attachments"
+    snapshots.mkdir(parents=True)
+    (snapshots / "reviewed.bin").write_bytes(b"Exact reviewed attachment")
+    (connector / "client.json").write_text("private-client-credentials")
+    (connector / "token.json").write_text("private-token")
+    archive_path = make_backup(SimpleNamespace(state=SimpleNamespace(data_dir=tmp_path)))
+    with zipfile.ZipFile(archive_path) as archive:
+        assert archive.read("connectors/google/attachments/reviewed.bin") == b"Exact reviewed attachment"
+        assert not any(name.endswith(("client.json", "token.json")) for name in archive.namelist())

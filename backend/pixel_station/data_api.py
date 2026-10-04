@@ -19,7 +19,12 @@ def make_backup(app) -> Path:
     target_dir.mkdir(exist_ok=True)
     destination = target_dir / ("pixel-station-" + now().replace(":", "-") + ".zip")
     selected = list(data_dir.glob("*.db")) + list(data_dir.glob("*.sqlite3"))
-    for folder in ("files", "file_edits", "images", "generated", "workflows"):
+    # Reviewed Gmail attachments are immutable application data. Include just
+    # their snapshot directory; connector credentials remain outside backups.
+    for folder in (
+        "files", "file_edits", "images", "generated", "workflows",
+        "connectors/google/attachments",
+    ):
         root = data_dir / folder
         if root.is_dir() and not root.is_symlink():
             selected.extend(root.rglob("*"))
