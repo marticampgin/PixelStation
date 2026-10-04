@@ -130,7 +130,13 @@ export function App() {
         {station.page === 'settings' ? <SettingsView station={station} /> : null}
         {station.page === 'web' ? <WebView station={station} /> : null}
         {station.page === 'images' ? <ImageStudio station={station} /> : null}
-        {station.page === 'gmail' ? <GmailView /> : null}
+        {station.page === 'gmail' ? (
+          <GmailView
+            onAnalyze={(file) =>
+              void station.beginChat(`Summarize the attached file ${file.filename}.`, [file])
+            }
+          />
+        ) : null}
         {station.page === 'calendar' ? <CalendarView /> : null}
         {station.page === 'games' ? <PokerView /> : null}
       </main>

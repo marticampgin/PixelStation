@@ -84,6 +84,7 @@ function setup() {
         migration_required: false,
       });
     if (path.startsWith('/api/google/gmail/threads?')) return json({ threads });
+    if (path === '/api/google/gmail/templates') return json([]);
     if (path.startsWith('/api/google/gmail/threads/'))
       return pending.get(path.split('/').at(-1)!)!.promise;
     if (path === '/api/google/gmail/reply') return reply.promise;
@@ -181,6 +182,8 @@ describe('Gmail thread requests', () => {
     await select(user, 'First thread');
     await act(async () => pending.get('first')!.resolve(json({ messages: messages('first') })));
     await user.click(screen.getByRole('button', { name: 'Generate reply' }));
+    for (const name of ['To', 'Subject', 'Draft', 'Instructions for drafting'])
+      expect(screen.getByRole('textbox', { name })).toBeDisabled();
     expect(screen.getByRole('button', { name: /Second thread/ })).toBeDisabled();
     await user.click(screen.getByRole('button', { name: /Second thread/ }));
     expect(screen.getByRole('heading', { level: 2, name: 'First thread' })).toBeVisible();
@@ -191,5 +194,20 @@ describe('Gmail thread requests', () => {
     expect(screen.getByRole('button', { name: /Second thread/ })).toBeEnabled();
     await select(user, 'Second thread');
     expect(screen.getByRole('textbox', { name: 'Draft' })).toHaveValue('');
+  });
+
+  it('requires a fresh send review after editing the composed message', async () => {
+    const { user, pending } = setup();
+    await select(user, 'First thread');
+    await act(async () => pending.get('first')!.resolve(json({ messages: messages('first') })));
+    await user.type(screen.getByRole('textbox', { name: 'Draft' }), 'Reviewed original.');
+    await user.click(screen.getByRole('button', { name: 'Review send' }));
+    expect(await screen.findByRole('button', { name: 'Confirm action' })).toBeEnabled();
+    await user.type(screen.getByRole('textbox', { name: 'Subject' }), ' changed');
+    expect(screen.queryByRole('button', { name: 'Confirm action' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Review send' }));
+    expect(await screen.findByRole('button', { name: 'Confirm action' })).toBeEnabled();
+    await user.type(screen.getByRole('textbox', { name: 'Draft' }), ' More text.');
+    expect(screen.queryByRole('button', { name: 'Confirm action' })).not.toBeInTheDocument();
   });
 });

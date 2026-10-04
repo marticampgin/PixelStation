@@ -1,15 +1,22 @@
-import { Mail, RefreshCw, Search, Send } from 'lucide-react';
+import { Download, FolderDown, Mail, MessageSquare, RefreshCw, Search, Send } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { errorMessage, post, request } from '../../api/client';
-import { EmptyState, ErrorNotice, Loading } from '../../components/ui';
+import { EmptyState, ErrorNotice, Loading, formatBytes } from '../../components/ui';
 import { useResource } from '../../hooks/useResource';
-import type { Approval, EmailMessage, EmailThread, GoogleServiceStatus } from '../../types';
+import type {
+  Approval,
+  EmailMessage,
+  EmailThread,
+  GoogleServiceStatus,
+  LocalFile,
+} from '../../types';
 import { ApprovalCard } from '../google/ApprovalCard';
 import { GoogleSetup } from '../google/GoogleSetup';
 import { replyTarget } from './replyTarget';
+import { EmailTemplates } from './EmailTemplates';
 
 const loadStatus = () => request<GoogleServiceStatus>('/google/gmail/status');
-export function GmailView() {
+export function GmailView({ onAnalyze }: { onAnalyze?: (file: LocalFile) => void } = {}) {
   const status = useResource(loadStatus);
   const [threads, setThreads] = useState<EmailThread[]>([]);
   const [messages, setMessages] = useState<EmailMessage[]>([]);
@@ -25,6 +32,11 @@ export function GmailView() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [approval, setApproval] = useState<Approval | null>(null);
+  const [imported, setImported] = useState<Record<string, LocalFile>>({});
+  const [availableFiles, setAvailableFiles] = useState<LocalFile[]>([]);
+  const [selectedFiles, setSelectedFiles] = useState<LocalFile[]>([]);
+  const [showFiles, setShowFiles] = useState(false);
+  const [templateIds, setTemplateIds] = useState<string[]>([]);
   const detailRequest = useRef<AbortController | null>(null);
   const working = busy || detailBusy;
   useEffect(
@@ -40,7 +52,7 @@ export function GmailView() {
     setNotice('');
     try {
       await run();
-      setNotice(success);
+      if (success) setNotice(success);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -70,6 +82,9 @@ export function GmailView() {
     setBody('');
     setInstructions('');
     setApproval(null);
+    setSelectedFiles([]);
+    setShowFiles(false);
+    setTemplateIds([]);
     setDetailBusy(true);
     setError('');
     setNotice('');
@@ -99,7 +114,22 @@ export function GmailView() {
     body,
     thread_id: thread?.id,
     in_reply_to: inReplyTo,
+    ...(selectedFiles.length ? { attachment_ids: selectedFiles.map((file) => file.id) } : {}),
   });
+  const attachmentPath = (messageId: string, partId: string) =>
+    `/google/gmail/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(partId)}`;
+  async function importAttachment(messageId: string, partId: string, analyze = false) {
+    await action(async () => {
+      const key = `${messageId}/${partId}`;
+      const file =
+        imported[key] ?? (await post<LocalFile>(`${attachmentPath(messageId, partId)}/import`));
+      setImported((previous) => ({ ...previous, [key]: file }));
+      setNotice(
+        `Saved ${file.filename} to Files${file.parse_status === 'ready' ? '' : ` (${file.parse_status})`}.`,
+      );
+      if (analyze) onAnalyze?.(file);
+    });
+  }
   if (status.loading)
     return (
       <div className="feature-page">
@@ -185,21 +215,67 @@ export function GmailView() {
                   </div>
                   <div className="email-body">{message.body}</div>
                   {message.attachments.length ? (
-                    <div className="subtle">
-                      Attachments:{' '}
-                      {message.attachments
-                        .map((attachment) => `${attachment.filename} (${attachment.size} bytes)`)
-                        .join(', ')}
-                    </div>
+                    <aside aria-label="Email attachments">
+                      {message.attachments.map((attachment, index) => (
+                        <div className="row-actions" key={attachment.part_id ?? index}>
+                          <span className="subtle">
+                            {attachment.filename} · {formatBytes(attachment.size)}
+                          </span>
+                          {attachment.part_id ? (
+                            <>
+                              <a
+                                className="button secondary"
+                                href={`/api${attachmentPath(message.id, attachment.part_id)}/content`}
+                                download
+                                aria-label={`Download ${attachment.filename}`}
+                              >
+                                <Download size={15} />
+                                Download
+                              </a>
+                              <button
+                                className="button secondary"
+                                disabled={working}
+                                aria-label={`Save ${attachment.filename} to Files`}
+                                onClick={() =>
+                                  void importAttachment(message.id, attachment.part_id!)
+                                }
+                              >
+                                <FolderDown size={15} />
+                                Save to Files
+                              </button>
+                              {onAnalyze ? (
+                                <button
+                                  className="button secondary"
+                                  disabled={working}
+                                  aria-label={`Analyze ${attachment.filename} in chat`}
+                                  onClick={() =>
+                                    void importAttachment(message.id, attachment.part_id!, true)
+                                  }
+                                >
+                                  <MessageSquare size={15} />
+                                  Analyze
+                                </button>
+                              ) : null}
+                            </>
+                          ) : (
+                            <span className="subtle">
+                              Refresh this thread to load attachment controls.
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </aside>
                   ) : null}
                 </article>
               ))}
               <section className="draft-editor">
                 <h3>Reply draft</h3>
+                <EmailTemplates selectedIds={templateIds} onSelected={setTemplateIds} />
                 <label>
                   Instructions for drafting
                   <input
                     value={instructions}
+                    disabled={working}
                     onChange={(event) => setInstructions(event.target.value)}
                     placeholder="Optional tone or content guidance"
                   />
@@ -212,8 +288,10 @@ export function GmailView() {
                       const result = await post<{ body: string }>('/google/gmail/reply', {
                         thread_id: thread.id,
                         instructions: instructions || undefined,
+                        ...(templateIds.length ? { template_ids: templateIds } : {}),
                       });
                       setBody(result.body);
+                      setApproval(null);
                     }, 'Reply generated for your review')
                   }
                 >
@@ -222,20 +300,87 @@ export function GmailView() {
                 </button>
                 <label>
                   To
-                  <input type="email" value={to} onChange={(event) => setTo(event.target.value)} />
+                  <input
+                    type="email"
+                    value={to}
+                    disabled={working}
+                    onChange={(event) => {
+                      setTo(event.target.value);
+                      setApproval(null);
+                    }}
+                  />
                 </label>
                 <label>
                   Subject
-                  <input value={subject} onChange={(event) => setSubject(event.target.value)} />
+                  <input
+                    value={subject}
+                    disabled={working}
+                    onChange={(event) => {
+                      setSubject(event.target.value);
+                      setApproval(null);
+                    }}
+                  />
                 </label>
                 <label>
                   Draft
                   <textarea
                     rows={8}
                     value={body}
-                    onChange={(event) => setBody(event.target.value)}
+                    disabled={working}
+                    onChange={(event) => {
+                      setBody(event.target.value);
+                      setApproval(null);
+                    }}
                   />
                 </label>
+                <button
+                  className="button secondary"
+                  disabled={working}
+                  onClick={() =>
+                    void action(async () => {
+                      setAvailableFiles(await request<LocalFile[]>('/files'));
+                      setShowFiles(true);
+                    })
+                  }
+                >
+                  Attach from Files
+                </button>
+                {showFiles ? (
+                  <fieldset>
+                    <legend>Attachments · up to four files, 6 MiB total</legend>
+                    {availableFiles.length ? (
+                      availableFiles.map((file) => (
+                        <label key={file.id}>
+                          <input
+                            type="checkbox"
+                            checked={selectedFiles.some((item) => item.id === file.id)}
+                            disabled={
+                              working ||
+                              (selectedFiles.length >= 4 &&
+                                !selectedFiles.some((item) => item.id === file.id))
+                            }
+                            onChange={(event) => {
+                              setApproval(null);
+                              setSelectedFiles((previous) =>
+                                event.target.checked
+                                  ? [...previous, file]
+                                  : previous.filter((item) => item.id !== file.id),
+                              );
+                            }}
+                          />
+                          {file.filename} · {formatBytes(file.size)}
+                        </label>
+                      ))
+                    ) : (
+                      <p className="subtle">Import a document into Files first.</p>
+                    )}
+                  </fieldset>
+                ) : null}
+                {selectedFiles.length ? (
+                  <p className="subtle">
+                    Attached: {selectedFiles.map((file) => file.filename).join(', ')}
+                  </p>
+                ) : null}
                 <div className="row-actions">
                   <button
                     className="button secondary"

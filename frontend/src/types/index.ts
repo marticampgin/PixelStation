@@ -158,7 +158,13 @@ export interface EmailMessage {
   to: string;
   date: string;
   body: string;
-  attachments: { filename: string; mime_type: string; size: number }[];
+  attachments: {
+    filename: string;
+    mime_type: string;
+    size: number;
+    part_id?: string;
+    attachment_id?: string | null;
+  }[];
   message_id?: string;
   reply_to?: string;
   label_ids?: string[];

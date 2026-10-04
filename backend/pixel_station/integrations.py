@@ -2,23 +2,29 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import sqlite3
 import time
 import uuid
+import zipfile
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.orm import Session
 
+from .database import get_session, record_dict
+from .files import ingest, sanitize_filename
 from .providers.comfy import ComfyImageProvider
-from .providers.google import GoogleConnector
+from .providers.google import MAX_ATTACHMENT_BYTES, GoogleConnector
 from .providers.web import IntegrationError, WebProvider
 
 
@@ -80,6 +86,7 @@ class EmailInput(Input):
     body: str = Field(max_length=200_000)
     thread_id: str | None = Field(default=None, max_length=200)
     in_reply_to: str | None = Field(default=None, max_length=1000)
+    attachment_ids: list[str] = Field(default_factory=list, max_length=4)
 
 
 class EventInput(Input):
@@ -152,6 +159,7 @@ class IntegrationServices:
                  *, inference_lock=None, before_image: Callable[[], Awaitable[dict]] | None = None) -> None:
         data_dir = Path(data_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
+        self.data_dir = data_dir.resolve()
         self.get_setting, self.set_setting = get_setting, set_setting
         self.web = WebProvider(lambda: str(get_setting("searxng_url", "http://127.0.0.1:8888") or ""))
         self.images = ComfyImageProvider(data_dir, lambda: str(get_setting("comfyui_url", "http://127.0.0.1:8188") or ""),
@@ -160,10 +168,87 @@ class IntegrationServices:
         self.google = GoogleConnector(data_dir)
         self.approvals = ApprovalStore(data_dir / "integration_approvals.sqlite3")
 
+    def _email_with_snapshots(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Freeze verified managed file bytes at review time, never client metadata."""
+        email = EmailInput.model_validate(payload).model_dump(exclude={"attachment_ids"})
+        ids = payload.get("attachment_ids") or []
+        if len(set(ids)) != len(ids) or any(not isinstance(id_, str) or len(id_) != 32 or any(c not in "0123456789abcdef" for c in id_) for id_ in ids):
+            raise IntegrationError("Choose distinct files from the managed Files library.", "invalid_attachment", 422)
+        if not ids:
+            self.google.email_payload(**email)
+            return email
+        snapshots, loaded, total = [], [], 0
+        folder = self.data_dir / "connectors" / "google" / "attachments"
+        folder.mkdir(parents=True, exist_ok=True)
+        if not folder.resolve().is_relative_to(self.data_dir):
+            raise IntegrationError("Email attachment snapshot directory is unavailable.", "attachment_unavailable", 422)
+        try:
+            with sqlite3.connect(f"file:{(self.data_dir / 'pixel_station.db').as_posix()}?mode=ro", uri=True) as db:
+                db.row_factory = sqlite3.Row
+                for id_ in ids:
+                    row = db.execute("SELECT filename,path,media_type,size,sha256 FROM attachments WHERE id=?", (id_,)).fetchone()
+                    if not row:
+                        raise IntegrationError("Selected file is no longer in the Files library.", "attachment_not_found", 404)
+                    path = Path(row["path"]).resolve()
+                    if not path.is_relative_to(self.data_dir) or not path.is_file() or row["size"] < 1 or row["size"] > MAX_ATTACHMENT_BYTES:
+                        raise IntegrationError("Selected file is unavailable or exceeds the 6 MiB email limit.", "invalid_attachment", 422)
+                    with path.open("rb") as source:
+                        content = source.read(MAX_ATTACHMENT_BYTES + 1)
+                    total += len(content)
+                    if total > MAX_ATTACHMENT_BYTES:
+                        raise IntegrationError("Email attachments must total at most 6 MiB.", "attachment_too_large", 422)
+                    digest = hashlib.sha256(content).hexdigest()
+                    if len(content) != row["size"] or digest != row["sha256"]:
+                        raise IntegrationError("Selected file changed. Reimport it before reviewing an email.", "attachment_changed", 409)
+                    metadata = {"id": uuid.uuid4().hex, "filename": row["filename"], "media_type": row["media_type"],
+                                "size": len(content), "sha256": digest}
+                    loaded.append({**metadata, "content": content})
+                    snapshots.append(metadata)
+            self.google.email_payload(**email, attachments=loaded)
+            # Only create snapshots after every input has passed validation.
+            for metadata, attachment in zip(snapshots, loaded, strict=True):
+                with (folder / (metadata["id"] + ".bin")).open("xb") as target:
+                    target.write(attachment["content"])
+        except sqlite3.Error as exc:
+            raise IntegrationError("Managed Files library could not be read.", "attachment_not_found", 404) from exc
+        except OSError as exc:
+            raise IntegrationError("Email attachment snapshot could not be saved.", "attachment_unavailable", 422) from exc
+        return {**email, "attachments": snapshots}
+
+    def _load_email_snapshots(self, payload: dict[str, Any]) -> dict[str, Any]:
+        email = {key: value for key, value in payload.items() if key != "attachments"}
+        loaded = []
+        folder = (self.data_dir / "connectors" / "google" / "attachments").resolve()
+        if not folder.is_relative_to(self.data_dir):
+            raise IntegrationError("Email attachment snapshot directory is unavailable.", "attachment_changed", 409)
+        for metadata in payload.get("attachments", []):
+            id_ = metadata.get("id", "")
+            if not isinstance(id_, str) or len(id_) != 32 or any(c not in "0123456789abcdef" for c in id_):
+                raise IntegrationError("Invalid email attachment snapshot.", "attachment_changed", 409)
+            path = (folder / (id_ + ".bin")).resolve()
+            try:
+                if not path.is_relative_to(folder) or not path.is_file():
+                    raise OSError("Snapshot missing")
+                with path.open("rb") as source:
+                    content = source.read(MAX_ATTACHMENT_BYTES + 1)
+            except OSError as exc:
+                raise IntegrationError("Reviewed attachment is unavailable. Review a new email proposal.", "attachment_changed", 409) from exc
+            if len(content) != metadata["size"] or hashlib.sha256(content).hexdigest() != metadata["sha256"]:
+                raise IntegrationError("Reviewed attachment bytes changed. Review a new email proposal.", "attachment_changed", 409)
+            loaded.append({**metadata, "content": content})
+        if loaded:
+            email["attachments"] = loaded
+        return email
+
+    async def create_gmail_draft(self, payload: dict[str, Any]) -> dict[str, Any]:
+        binding = self.google.gmail.binding()
+        prepared = self._email_with_snapshots(payload)
+        self.google.gmail.assert_binding(binding)
+        return await self.google.create_draft(**self._load_email_snapshots(prepared), connection_binding=binding)
+
     async def propose_action(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         if action == "gmail_send":
-            payload = EmailInput.model_validate(payload).model_dump()
-            self.google.email_payload(**payload)
+            payload = self._email_with_snapshots(payload)
         elif action in {"calendar_create", "calendar_update", "calendar_delete"}:
             if action != "calendar_delete":
                 self.google.validate_event(payload.get("event", {}))
@@ -183,7 +268,7 @@ class IntegrationServices:
         try:
             self.google.connection("gmail" if action == "gmail_send" else "calendar").assert_binding(payload.get("connection_binding"))
             if action == "gmail_send":
-                result = await self.google.send_email(**payload)
+                result = await self.google.send_email(**self._load_email_snapshots(payload))
             else:
                 result = await self.google.mutate_event(action, **payload)
             self.approvals.result(id_, result)
@@ -350,7 +435,30 @@ def create_integrations_router(services: IntegrationServices) -> APIRouter:
 
     @router.post("/api/google/gmail/drafts")
     async def draft(body: EmailInput) -> dict[str, Any]:
-        return await services.google.create_draft(**body.model_dump())
+        return await services.create_gmail_draft(body.model_dump())
+
+    @router.get("/api/google/gmail/messages/{message_id}/attachments/{part_id}/content")
+    async def attachment_content(message_id: str, part_id: str) -> Response:
+        result = await services.google.attachment(message_id, part_id)
+        try:
+            filename = sanitize_filename(result["filename"])
+        except ValueError as exc:
+            raise IntegrationError("Attachment has an invalid filename.", "invalid_attachment", 422) from exc
+        return Response(result["content"], media_type="application/octet-stream",
+                        headers={"Content-Disposition": "attachment; filename*=UTF-8''" + quote(filename),
+                                 "X-Content-Type-Options": "nosniff"})
+
+    @router.post("/api/google/gmail/messages/{message_id}/attachments/{part_id}/import")
+    async def attachment_import(message_id: str, part_id: str, request: Request,
+                                session: Session = Depends(get_session)) -> dict[str, Any]:
+        result = await services.google.attachment(message_id, part_id)
+        services.google.gmail.assert_binding(result["connection_binding"])
+        try:
+            row = await asyncio.to_thread(ingest, session, request.app.state.data_dir,
+                                          result["filename"], result["content"], "gmail")
+            return record_dict(row)
+        except (ValueError, UnicodeError, zipfile.BadZipFile, OSError) as exc:
+            raise IntegrationError(str(exc), "attachment_import_failed", 422) from exc
 
     @router.post("/api/google/gmail/send")
     async def send(body: EmailInput) -> dict[str, Any]:

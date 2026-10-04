@@ -100,3 +100,19 @@ Twelve isolated connection regressions cover scope/state/account separation, cli
 The final rendered research chat exposed a duplicate repository source link across its selected-source and merged research traces. Source links now deduplicate by normalized URL while preserving distinct queries, fragments and file/image artifacts. Two focused regressions passed, and the same native completed chat showed exactly one overlapping repository source link. A subsequent reload produced no browser console warnings or errors.
 
 Bundled interface art was created with Codex's Image Gen tool; the native image checks above independently verify the application's ComfyUI adapter.
+
+### Gmail attachments, reviewed templates and native writes
+
+The owner authorized clearly labeled test messages to a specific test recipient and fictional contract values. The real sent thread's DOCX attachment was downloaded through the connector and the rendered Download control; both downloads contained exactly 140,360 bytes with the same SHA-256. Save to Files completed through the rendered Gmail control, and the managed record parsed successfully. Private attachment contents, account identity, recipient, runtime IDs and captures remain excluded from Git.
+
+The rendered Gmail view saved a real draft, displayed its returned draft ID, prepared an exact account-bound send review, and completed confirmation once. A subsequent real thread read returned both the retained DRAFT message and a separate SENT message with the intended recipient, subject and exact benign test body. This verifies Google's saved sent copy; it does not independently verify delivery into the recipient's inbox. Creating a draft and separately sending the composed message leaves that draft intact.
+
+The template editor initially disabled unreviewed wording. Approving it enabled selection, and the installed local LiquidAI model generated the selected benign QA acknowledgment for review without inventing rental terms. Edits revoke approval; isolated stale-review coverage verifies that approval must match the exact displayed wording. Chat draft creation uses the same attachment snapshot service as the Gmail view.
+
+Inbound follow-up reads retain the initial account binding and validate the actual MIME part, decoded size and bounded content. Outbound reviews bind attachment names, media types, sizes and hashes to immutable local snapshots; changing a library record after review cannot replace the reviewed bytes. Missing, tampered or escaped snapshots are rejected. Isolated tests cover these failure paths; a native attached send remains a separate check.
+
+### Targeted edits to an owner-provided Word document
+
+An independent named library copy of the actual attachment received eight clearly fictional replacements covering signature/rental dates, services, membership, package/days and an explicitly invalid test price. The rendered Word editor selected body/table paragraphs, displayed each exact before/after pair, staged a hash-bound replacement and confirmed the reviewed copy. Downloading its saved content produced bytes identical to the proposal preview. One original revision remained available; downloading the master again confirmed its original hash.
+
+OOXML checks found that only `word/document.xml` changed. The other 25 ZIP members and all images remained byte-identical. Both documents contained 102 main-document paragraphs, 170 runs, one table and one section; all eight replacements were present. These structural checks do not prove unchanged page wrapping. Automatic approval review blocked extraction of an isolated LibreOffice renderer without a detailed reason. Visual page verification and delivery of the edited contract remain pending a renderer; no client contract was sent. XLSX and PDF editing limits remain documented separately.

@@ -6,6 +6,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import re
 import time
 from datetime import datetime
 from email.message import EmailMessage
@@ -26,6 +27,7 @@ SERVICE_SCOPES = {
 SCOPES = SERVICE_SCOPES["gmail"] + SERVICE_SCOPES["calendar"]
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me"
 CALENDAR = "https://www.googleapis.com/calendar/v3"
+MAX_ATTACHMENT_BYTES = 6 * 1024 * 1024
 
 
 class GoogleConnection:
@@ -322,7 +324,8 @@ class GoogleConnection:
             pending.extend(part.get("parts", []))
             body = part.get("body", {})
             if part.get("filename"):
-                attachments.append({"filename": part["filename"], "mime_type": part.get("mimeType"), "size": body.get("size", 0)})
+                attachments.append({"filename": part["filename"], "mime_type": part.get("mimeType"), "size": body.get("size", 0),
+                                    "part_id": part.get("partId") or "root", "attachment_id": body.get("attachmentId")})
                 continue
             if body.get("data") and part.get("mimeType") in {"text/plain", "text/html"}:
                 encoded = body["data"][:400_000]
@@ -348,8 +351,65 @@ class GoogleConnection:
         return {"id": result.get("id", id_), "snippet": result.get("messages", [{}])[-1].get("snippet", "") if result.get("messages") else "",
                 "messages": [self._message(message) for message in result.get("messages", [])]}
 
+    async def attachment(self, message_id: str, part_id: str) -> dict[str, Any]:
+        """Read only an attachment proven by the current account's message payload."""
+        if (not re.fullmatch(r"[A-Za-z0-9_-]{1,200}", message_id)
+                or not re.fullmatch(r"(?:root|[0-9]+(?:\.[0-9]+)*)", part_id)
+                or len(part_id) > 200):
+            raise IntegrationError("Invalid Gmail message or attachment part ID.", "invalid_attachment", 422)
+        binding = self.binding()
+        message = await self.request("GET", GMAIL + "/messages/" + message_id,
+                                     params={"format": "full"}, connection_binding=binding)
+        self.assert_binding(binding)
+        if message.get("id") != message_id:
+            raise IntegrationError("Google returned a different message.", "invalid_attachment", 422)
+        pending = [message.get("payload", {})]
+        matches = []
+        for _ in range(256):
+            if not pending:
+                break
+            part = pending.pop()
+            if not isinstance(part, dict) or not isinstance(part.get("parts", []), list):
+                raise IntegrationError("Google returned invalid attachment metadata.", "invalid_attachment", 422)
+            pending.extend(part.get("parts", []))
+            if (part.get("partId") or "root") == part_id and part.get("filename"):
+                matches.append(part)
+        if pending or len(matches) != 1:
+            raise IntegrationError("Attachment part was not found unambiguously in this message.", "attachment_not_found", 404)
+        part = matches[0]
+        body = part.get("body", {})
+        filename = part.get("filename")
+        size = body.get("size") if isinstance(body, dict) else None
+        if (not isinstance(filename, str) or len(filename) > 1000
+                or not isinstance(size, int) or isinstance(size, bool) or size < 1
+                or size > MAX_ATTACHMENT_BYTES):
+            raise IntegrationError("Gmail attachments must contain data and be at most 6 MiB.", "attachment_too_large", 422)
+        encoded = body.get("data")
+        attachment_id = body.get("attachmentId")
+        if attachment_id:
+            if not isinstance(attachment_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,2000}", attachment_id):
+                raise IntegrationError("Google returned an invalid attachment ID.", "invalid_attachment", 422)
+            content = await self.request("GET", GMAIL + "/messages/" + message_id + "/attachments/" + attachment_id,
+                                         connection_binding=binding)
+            self.assert_binding(binding)
+            if content.get("size") != size:
+                raise IntegrationError("Attachment size differs from its message metadata.", "invalid_attachment", 422)
+            encoded = content.get("data")
+        if not isinstance(encoded, str) or len(encoded) > ((MAX_ATTACHMENT_BYTES + 2) // 3) * 4:
+            raise IntegrationError("Google returned invalid attachment data.", "invalid_attachment", 422)
+        try:
+            decoded = base64.b64decode(encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True)
+        except ValueError as exc:
+            raise IntegrationError("Google returned invalid attachment encoding.", "invalid_attachment", 422) from exc
+        if len(decoded) != size:
+            raise IntegrationError("Attachment bytes differ from their verified size.", "invalid_attachment", 422)
+        self.assert_binding(binding)
+        return {"filename": filename, "mime_type": part.get("mimeType"), "content": decoded,
+                "connection_binding": binding}
+
     @staticmethod
-    def email_payload(to: str, subject: str, body: str, thread_id: str | None = None, in_reply_to: str | None = None) -> dict[str, Any]:
+    def email_payload(to: str, subject: str, body: str, thread_id: str | None = None, in_reply_to: str | None = None,
+                      attachments: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         if any("\r" in value or "\n" in value for value in [to, subject, in_reply_to or ""]) or not subject.strip() or len(body) > 200_000:
             raise IntegrationError("Provide a recipient, subject and body; email headers cannot contain newlines.", "invalid_email", 422)
         recipients = getaddresses([to])
@@ -360,13 +420,28 @@ class GoogleConnection:
         if in_reply_to:
             msg["In-Reply-To"], msg["References"] = in_reply_to, in_reply_to
         msg.set_content(body)
+        attachments = attachments or []
+        if len(attachments) > 4:
+            raise IntegrationError("Email attachments must total at most 6 MiB, with at most four files.", "attachment_too_large", 422)
+        total = 0
+        for attachment in attachments:
+            filename, media_type, content = attachment.get("filename"), attachment.get("media_type"), attachment.get("content")
+            if (not isinstance(filename, str) or not filename or len(filename) > 150
+                    or any(c in filename for c in "\r\n/\\") or not isinstance(content, bytes) or not content
+                    or not isinstance(media_type, str) or not re.fullmatch(r"[A-Za-z0-9.+_-]+/[A-Za-z0-9.+_-]+", media_type)):
+                raise IntegrationError("Invalid verified email attachment.", "invalid_attachment", 422)
+            total += len(content)
+            if total > MAX_ATTACHMENT_BYTES:
+                raise IntegrationError("Email attachments must total at most 6 MiB.", "attachment_too_large", 422)
+            maintype, subtype = media_type.split("/", 1)
+            msg.add_attachment(content, maintype=maintype, subtype=subtype, filename=filename)
         payload: dict[str, Any] = {"raw": base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")}
         if thread_id:
             payload["threadId"] = thread_id
         return payload
 
-    async def create_draft(self, **email: Any) -> dict[str, Any]:
-        binding = self.binding()
+    async def create_draft(self, *, connection_binding: dict[str, Any] | None = None, **email: Any) -> dict[str, Any]:
+        binding = connection_binding or self.binding()
         result = await self.request("POST", GMAIL + "/drafts", body={"message": self.email_payload(**email)}, connection_binding=binding)
         if not result.get("id"):
             raise self._accepted_unverified("gmail_draft", None)
@@ -377,12 +452,16 @@ class GoogleConnection:
             raise self._accepted_unverified("gmail_draft", result["id"], exc) from exc
         if verified.get("id") != result["id"]:
             raise self._accepted_unverified("gmail_draft", result["id"])
+        if email.get("attachments"):
+            result["attachment_count"] = len(email["attachments"])
         return result
 
     async def send_email(self, *, connection_binding: dict[str, Any] | None = None, **email: Any) -> dict[str, Any]:
         result = await self.request("POST", GMAIL + "/messages/send", body=self.email_payload(**email), connection_binding=connection_binding)
         if not result.get("id"):
             raise self._accepted_unverified("gmail_send", None)
+        if email.get("attachments"):
+            result["attachment_count"] = len(email["attachments"])
         return result
 
     @staticmethod
@@ -545,6 +624,9 @@ class GoogleConnector:
 
     async def thread(self, id_: str, **kwargs: Any) -> dict[str, Any]:
         return await self.gmail.thread(id_, **kwargs)
+
+    async def attachment(self, message_id: str, part_id: str) -> dict[str, Any]:
+        return await self.gmail.attachment(message_id, part_id)
 
     async def create_draft(self, **email: Any) -> dict[str, Any]:
         return await self.gmail.create_draft(**email)

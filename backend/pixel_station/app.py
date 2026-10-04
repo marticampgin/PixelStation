@@ -9,7 +9,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from . import chat, data_api, file_edits, files, google_tools, harness, memory, poker
+from . import (
+    chat,
+    data_api,
+    email_templates,
+    file_edits,
+    files,
+    google_tools,
+    harness,
+    memory,
+    poker,
+)
 from .config import AppSettings, data_directory
 from .database import Database, Setting
 from .integrations import IntegrationServices, create_integrations_router
@@ -206,6 +216,7 @@ def create_app(data_dir: Path | None = None, llm=None, discover: bool = True) ->
         harness.router,
         data_api.router,
         google_tools.router,
+        email_templates.router,
         poker.create_poker_router(),
         create_integrations_router(app.state.integration_services),
     ):

@@ -112,7 +112,7 @@ def test_database_migration_wal_foreign_keys(tmp_path):
         assert connection.execute(text("PRAGMA journal_mode")).scalar() == "wal"
         assert connection.execute(text("PRAGMA foreign_keys")).scalar() == 1
         assert (
-            connection.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0003"
+            connection.execute(text("SELECT version_num FROM alembic_version")).scalar() == "0004"
         )
         assert connection.execute(
             text("SELECT name FROM sqlite_master WHERE name='memories_fts'")
@@ -1450,6 +1450,8 @@ def test_embedding_json_null_data_migration(tmp_path):
         ingest(session, tmp_path, "notes.md", b"Notes")
         session.execute(text("UPDATE memories SET embedding='null'"))
         session.execute(text("UPDATE document_chunks SET embedding='null'"))
+        # Recreate the pre-template schema before replaying the later migrations.
+        session.execute(text("DROP TABLE email_templates"))
         session.execute(text("UPDATE alembic_version SET version_num='0002'"))
         session.commit()
     database.migrate()
