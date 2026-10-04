@@ -1,0 +1,19 @@
+.targeted-edit-fields {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+.targeted-edit-fields legend {
+  padding: 0 8px;
+  color: var(--text);
+}
+.targeted-edit-fields select {
+  width: 100%;
+  max-width: 100%;
+}
+.modal .targeted-edit-fields textarea {
+  min-height: 80px;
+}

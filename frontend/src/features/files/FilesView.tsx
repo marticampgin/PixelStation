@@ -1,4 +1,5 @@
 import {
+  Copy,
   Download,
   FileText,
   MessageSquare,
@@ -23,6 +24,8 @@ import {
 import { useResource } from '../../hooks/useResource';
 import type { Station } from '../../hooks/useStation';
 import type { LocalFile } from '../../types';
+import { FileEditReview, type FileEditProposal } from './FileEditCard';
+import { TargetedDocxEditor, type TargetedDocument } from './TargetedDocxEditor';
 
 const loadFiles = () => core.files();
 export function FilesView({ station }: { station: Station }) {
@@ -31,6 +34,8 @@ export function FilesView({ station }: { station: Station }) {
   const [busy, setBusy] = useState(false);
   const [deleting, setDeleting] = useState<LocalFile | null>(null);
   const [creating, setCreating] = useState(false);
+  const [copying, setCopying] = useState<LocalFile | null>(null);
+  const [copyFilename, setCopyFilename] = useState('');
   const [filename, setFilename] = useState('document');
   const [content, setContent] = useState('');
   const [format, setFormat] = useState('md');
@@ -43,15 +48,8 @@ export function FilesView({ station }: { station: Station }) {
     warning?: string;
   } | null>(null);
   const [editPlan, setEditPlan] = useState('');
-  const [proposal, setProposal] = useState<{
-    id: string;
-    file_id: string;
-    filename: string;
-    preview_content: string;
-    plan: string;
-    scope?: string;
-    warning?: string;
-  } | null>(null);
+  const [targetedEditing, setTargetedEditing] = useState<TargetedDocument | null>(null);
+  const [proposal, setProposal] = useState<FileEditProposal | null>(null);
   const input = useRef<HTMLInputElement>(null);
   const files =
     resource.data?.filter((file) => file.filename.toLowerCase().includes(search.toLowerCase())) ??
@@ -80,8 +78,12 @@ export function FilesView({ station }: { station: Station }) {
   async function openEdit(file: LocalFile) {
     setBusy(true);
     try {
-      setEditing(await request(`/files/${file.id}/edit-content`));
-      setEditPlan('Update document content');
+      if (file.extension === '.docx') {
+        setTargetedEditing(await request(`/files/${file.id}/edit-targets`));
+      } else {
+        setEditing(await request(`/files/${file.id}/edit-content`));
+        setEditPlan('Update document content');
+      }
     } catch (err) {
       resource.setError(errorMessage(err));
     } finally {
@@ -168,6 +170,18 @@ export function FilesView({ station }: { station: Station }) {
                 )}
               </div>
               <div className="row-actions">
+                <button
+                  className="icon-button"
+                  title="Make a copy"
+                  aria-label={`Make a copy of ${file.filename}`}
+                  disabled={busy}
+                  onClick={() => {
+                    setCopying(file);
+                    setCopyFilename(file.filename.replace(/(\.[^.]+)$/, ' copy$1'));
+                  }}
+                >
+                  <Copy size={17} />
+                </button>
                 {['txt', 'md', 'csv', 'xlsx', 'docx', 'pdf'].includes(
                   file.extension.replace('.', ''),
                 ) ? (
@@ -252,6 +266,16 @@ export function FilesView({ station }: { station: Station }) {
           </form>
         </Modal>
       ) : null}
+      {targetedEditing ? (
+        <TargetedDocxEditor
+          document={targetedEditing}
+          onClose={() => setTargetedEditing(null)}
+          onProposed={(next) => {
+            setTargetedEditing(null);
+            setProposal(next);
+          }}
+        />
+      ) : null}
       {proposal ? (
         <ConfirmDialog
           title={`Replace ${proposal.filename}?`}
@@ -271,7 +295,7 @@ export function FilesView({ station }: { station: Station }) {
             The original file must still match the reviewed version. Confirm to replace its library
             content.
           </p>
-          <pre className="code-block edit-preview">{proposal.preview_content}</pre>
+          <FileEditReview proposal={proposal} />
           <ErrorNotice message={resource.error} />
         </ConfirmDialog>
       ) : null}
@@ -284,6 +308,38 @@ export function FilesView({ station }: { station: Station }) {
         >
           {deleting.filename} will be removed from your local library.
         </ConfirmDialog>
+      ) : null}
+      {copying ? (
+        <Modal title="Make a library copy" onClose={() => setCopying(null)}>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              void mutate(async () => {
+                await post(`/files/${copying.id}/copy`, { filename: copyFilename });
+                setCopying(null);
+              });
+            }}
+          >
+            <p className="subtle">
+              Give this copy its own name before editing. The source document stays unchanged.
+            </p>
+            <label>
+              Filename for copy
+              <input
+                value={copyFilename}
+                maxLength={150}
+                onChange={(event) => setCopyFilename(event.target.value)}
+                required
+              />
+            </label>
+            <ErrorNotice message={resource.error} />
+            <div className="modal-actions">
+              <button className="button" disabled={busy} type="submit">
+                {busy ? 'Copying…' : 'Make a copy'}
+              </button>
+            </div>
+          </form>
+        </Modal>
       ) : null}
       {creating ? (
         <Modal title="Create document" onClose={() => setCreating(false)}>

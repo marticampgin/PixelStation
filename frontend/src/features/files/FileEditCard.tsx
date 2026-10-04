@@ -12,6 +12,51 @@ export interface FileEditProposal {
   plan: string;
   scope?: string;
   warning?: string;
+  edit_mode?: string;
+  before_sha256?: string;
+  after_sha256?: string;
+  expires_at?: string;
+  changes?: { location: string; before: string; after: string; matches: number }[];
+}
+
+export function FileEditReview({ proposal }: { proposal: FileEditProposal }) {
+  return (
+    <>
+      {proposal.changes?.length ? (
+        <div>
+          {proposal.changes.map((change, index) => (
+            <div key={`${change.location}:${index}`}>
+              <p className="subtle">
+                Replacement {index + 1} · {change.location} · {change.matches} exact match
+              </p>
+              <div className="subtle">Before</div>
+              <pre className="code-block edit-preview">{change.before}</pre>
+              <div className="subtle">After</div>
+              <pre className="code-block edit-preview">{change.after || '(remove this text)'}</pre>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      <details open={!proposal.changes?.length}>
+        <summary className="subtle">
+          {proposal.changes?.length ? 'Review paragraph context' : 'Review replacement content'}
+        </summary>
+        <pre className="code-block edit-preview">{proposal.preview_content}</pre>
+      </details>
+      {proposal.before_sha256 ? (
+        <details>
+          <summary className="subtle">Reviewed file hashes</summary>
+          <p className="subtle">Original SHA256</p>
+          <pre className="code-block">{proposal.before_sha256}</pre>
+          <p className="subtle">Replacement SHA256</p>
+          <pre className="code-block">{proposal.after_sha256}</pre>
+        </details>
+      ) : null}
+      <a href={`/api/files/edit-proposals/${proposal.id}/preview`} className="text-button" download>
+        <Download size={14} /> Download reviewed replacement
+      </a>
+    </>
+  );
 }
 
 export function FileEditCard({ proposal }: { proposal: FileEditProposal }) {
@@ -63,10 +108,7 @@ export function FileEditCard({ proposal }: { proposal: FileEditProposal }) {
         <>
           <p className="edit-plan">{proposal.plan}</p>
           {proposal.warning ? <div className="notice">{proposal.warning}</div> : null}
-          <details open>
-            <summary className="subtle">Review replacement content</summary>
-            <pre className="code-block edit-preview">{proposal.preview_content}</pre>
-          </details>
+          <FileEditReview proposal={proposal} />
           <ErrorNotice message={error} />
           <div className="row-actions">
             <button className="button" disabled={busy} onClick={() => void act(true)}>

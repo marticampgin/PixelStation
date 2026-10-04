@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from pixel_station.database import Attachment, DocumentChunk
 from pixel_station.file_edits import (
     FileEditProposal,
     FileRevision,
+    PlannedTargetedEdit,
     create_file_edit_router,
     propose_chat_edit,
 )
@@ -291,3 +293,221 @@ def test_remote_origin_cannot_propose_file_edits(client):
     response = client.post(f"/api/files/{original['id']}/edit-proposals", json={"content": "Updated"},
                            headers={"Origin": "https://example.com"})
     assert response.status_code == 403
+
+
+def contract_docx():
+    from docx import Document
+    from docx.shared import Inches
+    from PIL import Image
+
+    document = Document()
+    paragraph = document.add_paragraph(style="Heading 2")
+    paragraph.add_run("Signature: ")
+    paragraph.add_run("01.10.").bold = True
+    paragraph.add_run("2026").italic = True
+    paragraph.add_run("; rent: 09.10.2026.")
+    table = document.add_table(rows=1, cols=1)
+    table.cell(0, 0).paragraphs[0].add_run("Package: weekend").bold = True
+    document.sections[0].header.paragraphs[0].text = "Contract series: REF-1"
+    document.sections[0].footer.paragraphs[0].text = "Member: no"
+    image = io.BytesIO()
+    Image.new("RGB", (2, 2), "red").save(image, "PNG")
+    image.seek(0)
+    document.add_picture(image, width=Inches(0.2))
+    document.add_paragraph("Date repeated: Date repeated")
+    document.add_paragraph("Line\tbreak")
+    document.add_paragraph("Overlapping: aaaa")
+    output = io.BytesIO()
+    document.save(output)
+    return output.getvalue()
+
+
+def targeted(client, original, replacements, **overrides):
+    targets = client.get(f"/api/files/{original['id']}/edit-targets").json()
+    changes = []
+    for containing, before, after in replacements:
+        location = next(item["location"] for item in targets["targets"] if containing in item["text"])
+        changes.append({"location": location, "before": before, "after": after})
+    return client.post(f"/api/files/{original['id']}/targeted-edit-proposals",
+                       json={"before_sha256": original["sha256"], "changes": changes, **overrides})
+
+
+def test_targeted_docx_edits_split_runs_tables_headers_and_footers_without_rebuilding(client):
+    from docx import Document
+    from lxml import etree
+
+    source = contract_docx()
+    original = upload(client, "test-contract.docx", source)
+    targets = client.get(f"/api/files/{original['id']}/edit-targets").json()
+    assert any(target["in_table"] and "Package" in target["text"] for target in targets["targets"])
+    assert {target["section"] for target in targets["targets"]} == {"body", "header", "footer"}
+    response = targeted(client, original, [
+        ("Signature:", "01.10.2026", "02.11.2099 (TEST)"),
+        ("Signature:", "09.10.2026", "12.11.2099 (TEST)"),
+        ("Package:", "weekend", "three days (TEST)"),
+        ("Contract series:", "REF-1", "REF-TEST"),
+        ("Member:", "no", "yes (TEST)"),
+    ])
+    assert response.status_code == 200, response.text
+    proposal = response.json()
+    assert proposal["edit_mode"] == "targeted_text"
+    assert len(proposal["changes"]) == 5
+    assert all(change["matches"] == 1 for change in proposal["changes"])
+    assert "Before:" in proposal["preview_content"] and "After:" in proposal["preview_content"]
+    assert "first affected text run" in proposal["warning"]
+    preview = client.get(f"/api/files/edit-proposals/{proposal['id']}/preview")
+    assert preview.status_code == 200
+    assert hashlib.sha256(preview.content).hexdigest() == proposal["after_sha256"]
+    assert client.get(f"/api/files/{original['id']}/content").content == source
+    assert confirm(client, proposal["id"]).status_code == 200
+    updated_bytes = client.get(f"/api/files/{original['id']}/content").content
+    assert updated_bytes == preview.content
+    updated = Document(io.BytesIO(updated_bytes))
+    paragraph = updated.paragraphs[0]
+    assert paragraph.style.name == "Heading 2"
+    assert paragraph.runs[1].text == "02.11.2099 (TEST)" and paragraph.runs[1].bold
+    assert paragraph.runs[2].text == "" and paragraph.runs[2].italic
+    assert paragraph.runs[3].text == "; rent: 12.11.2099 (TEST)."
+    assert updated.tables[0].cell(0, 0).text == "Package: three days (TEST)"
+    assert updated.tables[0].cell(0, 0).paragraphs[0].runs[0].bold
+    assert updated.sections[0].header.paragraphs[0].text == "Contract series: REF-TEST"
+    assert updated.sections[0].footer.paragraphs[0].text == "Member: yes (TEST)"
+    assert len(updated.inline_shapes) == 1
+    with zipfile.ZipFile(io.BytesIO(source)) as before, zipfile.ZipFile(io.BytesIO(updated_bytes)) as after:
+        assert before.namelist() == after.namelist()
+        for part in before.namelist():
+            if part not in {"word/document.xml", "word/header1.xml", "word/footer1.xml"}:
+                assert before.read(part) == after.read(part)
+            else:
+                trees = [etree.fromstring(archive.read(part)) for archive in (before, after)]
+                for tree in trees:
+                    for node in tree.iter("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"):
+                        node.text = ""
+                        node.attrib.pop("{http://www.w3.org/XML/1998/namespace}space", None)
+                assert etree.tostring(trees[0], method="c14n") == etree.tostring(trees[1], method="c14n")
+    assert confirm(client, proposal["id"]).status_code == 409
+    assert client.get(f"/api/files/edit-proposals/{proposal['id']}/preview").status_code == 409
+
+
+@pytest.mark.parametrize("replacement,expected", [
+    (("Date repeated", "Date", "TEST"), "found 2"),
+    (("Signature:", "unknown date", "TEST"), "found 0"),
+    (("Line", "Line\tbreak", "TEST"), "tab or line break"),
+    (("Signature:", "01.10.2026", "two\nlines"), "inline text"),
+    (("Overlapping:", "aaa", "TEST"), "found 2"),
+])
+def test_targeted_replacements_reject_ambiguous_missing_or_structural_spans(client, app, replacement, expected):
+    source = contract_docx()
+    original = upload(client, "test-contract.docx", source)
+    response = targeted(client, original, [replacement])
+    assert response.status_code == 422
+    assert expected in response.text
+    assert client.get(f"/api/files/{original['id']}/content").content == source
+    with app.state.database.session() as session:
+        assert list(session.scalars(select(FileEditProposal))) == []
+
+
+def test_targeted_replacements_reject_overlap_and_stale_snapshot(client):
+    original = upload(client, "test-contract.docx", contract_docx())
+    response = targeted(client, original, [("Signature:", "Signature:", "Test"),
+                                          ("Signature:", "Signature: 01.10.2026", "Test")])
+    assert response.status_code == 422 and "overlap" in response.text
+    response = targeted(client, original, [("Signature:", "01.10.2026", "TEST")], before_sha256="0" * 64)
+    assert response.status_code == 409
+    assert "Reload" in response.text
+
+
+@pytest.mark.parametrize("alteration", ["original", "stage", "proposal", "expire"])
+def test_targeted_preview_and_confirmation_revalidate_reviewed_state(client, app, alteration):
+    original = upload(client, "test-contract.docx", contract_docx())
+    proposal = targeted(client, original, [("Signature:", "01.10.2026", "TEST")]).json()
+    if alteration == "original":
+        Path(original["path"]).write_bytes(b"changed externally")
+    elif alteration == "stage":
+        app.state.file_edits._stage(proposal["id"], ".docx").write_bytes(b"changed stage")
+    else:
+        with app.state.database.session() as session:
+            row = session.get(FileEditProposal, proposal["id"])
+            if alteration == "proposal":
+                row.content = "altered changes"
+            else:
+                row.expires_at = 0
+            session.commit()
+    assert client.get(f"/api/files/edit-proposals/{proposal['id']}/preview").status_code == 409
+    assert confirm(client, proposal["id"]).status_code == 409
+
+
+def test_targeted_docx_rejects_paragraph_with_word_fields(client):
+    from docx import Document
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    document = Document()
+    paragraph = document.add_paragraph("Signature: 01.10.2026")
+    field = OxmlElement("w:fldChar")
+    field.set(qn("w:fldCharType"), "begin")
+    paragraph.add_run()._r.append(field)
+    output = io.BytesIO()
+    document.save(output)
+    original = upload(client, "field-contract.docx", output.getvalue())
+    response = targeted(client, original, [("Signature:", "01.10.2026", "TEST")])
+    assert response.status_code == 422 and "Fields or tracked changes" in response.text
+
+
+@pytest.mark.asyncio
+async def test_chat_docx_uses_small_targeted_changes_and_keeps_original(app):
+    from pixel_station.files import ingest
+
+    class TargetedLLM:
+        async def structured(self, model, messages, schema, **kwargs):
+            assert schema is PlannedTargetedEdit
+            assert "Do not regenerate the document" in messages[0]["content"]
+            assert "Do not invent missing dates" in messages[0]["content"]
+            return schema(file_id=original.id, plan="Use the explicit TEST signature date.",
+                          changes=[{"location": "word/document.xml:p:0", "before": "01.10.2026", "after": "02.11.2099 (TEST)"}])
+
+    source = contract_docx()
+    with app.state.database.session() as session:
+        original = ingest(session, app.state.data_dir, "test-contract.docx", source)
+    app.state.llm = TargetedLLM()
+    settings = app.state.settings()
+    settings.roles["planner"] = "test-local"
+    app.state.set_settings(settings)
+    result = await propose_chat_edit(app, [original.id], "Set the signature date to 02.11.2099 (TEST).")
+    assert result["file_edit"]["edit_mode"] == "targeted_text"
+    assert result["file_edit"]["changes"][0]["matches"] == 1
+    assert Path(original.path).read_bytes() == source
+
+
+def test_named_library_copy_has_own_record_chunks_and_revisions_without_changing_source(client, app):
+    source = contract_docx()
+    original = upload(client, "master.docx", source)
+    original_record = client.get(f"/api/files/{original['id']}").json()
+    metadata = Path(original["path"]).parent / "records" / original["id"] / "metadata.json"
+    original_metadata = metadata.read_bytes()
+    response = client.post(f"/api/files/{original['id']}/copy", json={"filename": "TEST client copy.docx"})
+    assert response.status_code == 200, response.text
+    copy = response.json()
+    assert copy["id"] != original["id"]
+    assert copy["filename"] == "TEST client copy.docx" and copy["source"] == "copied"
+    assert copy["sha256"] == original["sha256"] and copy["path"] == original["path"]
+    copy_record = client.get(f"/api/files/{copy['id']}").json()
+    assert {chunk["id"] for chunk in copy_record["chunks"]}.isdisjoint(chunk["id"] for chunk in original_record["chunks"])
+    assert [chunk["text"] for chunk in copy_record["chunks"]] == [chunk["text"] for chunk in original_record["chunks"]]
+    proposal = targeted(client, copy, [("Signature:", "01.10.2026", "TEST date")]).json()
+    assert confirm(client, proposal["id"]).status_code == 200
+    assert client.get(f"/api/files/{original['id']}/content").content == source
+    assert client.get(f"/api/files/{original['id']}").json() == original_record
+    assert metadata.read_bytes() == original_metadata
+    assert len(client.get(f"/api/files/{copy['id']}/revisions").json()) == 1
+    assert client.get(f"/api/files/{original['id']}/revisions").json() == []
+    with app.state.database.session() as session:
+        assert session.get(Attachment, original["id"]).sha256 == original["sha256"]
+
+
+def test_library_copy_rejects_changed_format_or_external_bytes(client):
+    original = upload(client)
+    assert client.post(f"/api/files/{original['id']}/copy", json={"filename": "invalid.pdf"}).status_code == 422
+    Path(original["path"]).write_bytes(b"external mutation")
+    response = client.post(f"/api/files/{original['id']}/copy", json={"filename": "copy.txt"})
+    assert response.status_code == 409
