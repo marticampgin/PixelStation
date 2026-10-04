@@ -116,7 +116,9 @@ export function useStation() {
   }, [conversationId]);
 
   function newChat() {
-    if (busy) cancel();
+    if (busy || abort.current) cancel();
+    ++loadSequence.current;
+    createdId.current = null;
     activeId.current = null;
     setConversationId(null);
     setConversation(null);
@@ -124,6 +126,8 @@ export function useStation() {
     setWebSources([]);
     setDraft('');
     setStreaming('');
+    setStatus('');
+    setLoadingChat(false);
     setRetrievedMemories([]);
     setPage('chat');
   }
@@ -159,6 +163,9 @@ export function useStation() {
     try {
       if (!id) {
         const created = await core.createConversation();
+        // Creation may finish after New chat cancelled this request. Keep the
+        // detached record out of the current view and do not begin its stream.
+        if (controller.signal.aborted) return;
         id = created.id;
         activeId.current = id;
         createdId.current = id;
@@ -207,6 +214,7 @@ export function useStation() {
             },
         controller.signal,
         (event) => {
+          if (controller.signal.aborted || activeId.current !== id) return;
           if (event.type === 'reset') {
             setStreaming('');
             setStatus(String(event.detail ?? 'Preparing a corrected response…'));
@@ -223,7 +231,8 @@ export function useStation() {
         },
       );
     } catch (err) {
-      if (!(err instanceof DOMException && err.name === 'AbortError')) setError(errorMessage(err));
+      if (!controller.signal.aborted && !(err instanceof DOMException && err.name === 'AbortError'))
+        setError(errorMessage(err));
     } finally {
       setBusy(false);
       setStatus('');

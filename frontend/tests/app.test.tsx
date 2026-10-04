@@ -142,6 +142,21 @@ function mockApi(custom?: (path: string, init?: RequestInit) => Response | undef
 }
 
 describe('workstation interactions', () => {
+  it('opens a blank chat in one sidebar click when leaving Gmail with a saved conversation', async () => {
+    localStorage.setItem('pixel-station:v1:conversation', JSON.stringify(conversation.id));
+    mockApi();
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText('Saved message from an earlier session.');
+    await user.click(screen.getByRole('button', { name: 'Gmail' }));
+    await screen.findByRole('button', { name: 'Authorize Gmail' });
+    await user.click(screen.getByRole('button', { name: 'New chat' }));
+    expect(screen.getByRole('heading', { name: 'New chat', level: 1 })).toBeVisible();
+    expect(screen.queryByText('Saved message from an earlier session.')).not.toBeInTheDocument();
+    expect(localStorage.getItem('pixel-station:v1:conversation')).toBe('null');
+    expect(screen.getByRole('textbox', { name: 'Message Pixel Station' })).toHaveValue('');
+  });
+
   it('starts compact views with visible chat, opens one drawer at a time, and preserves desktop preferences', async () => {
     let compact = true;
     const listeners = new Set<() => void>();
