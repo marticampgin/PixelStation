@@ -1,5 +1,7 @@
 """Bounded passive statistics and redacted diagnostic records."""
 
+import hashlib
+import json
 import math
 from collections import Counter, defaultdict
 from datetime import UTC, datetime, timedelta
@@ -8,6 +10,159 @@ from sqlalchemy import func, select
 
 from .database import AgentRun, FrictionEvent, HarnessReport, now
 from .observability import runtime_versions, safe_configuration
+
+# Only application-controlled labels become public diagnostics. Error text,
+# provider URLs, model answers, and user-supplied tool arguments are never parsed.
+DIAGNOSTIC_CODES = frozenset({
+    "google_not_connected", "google_reconnect", "google_access_denied", "google_api_failed",
+    "google_timeout", "google_identity_unavailable", "google_scopes_missing", "keyring_unavailable",
+    "approval_connection_changed", "approval_unavailable", "approval_changed", "accepted_unverified",
+    "attachment_changed", "attachment_unavailable", "attachment_not_found", "attachment_too_large",
+    "attachment_import_failed", "invalid_attachment", "invalid_email", "invalid_event", "event_changed",
+    "search_forbidden", "search_engines_unavailable", "search_unavailable", "search_failed", "search_timeout",
+    "searxng_missing", "invalid_search_response", "unsupported_content", "no_text", "redirect_limit",
+    "fetch_failed", "fetch_timeout", "unsafe_url", "response_too_large", "invalid_url", "not_found",
+    "comfyui_unavailable", "comfyui_failed", "image_timeout", "image_failed", "invalid_workflow",
+    "unsupported_tool_protocol", "research_plan_error", "removed_unretrieved_citations",
+    "invalid_poker_action", "embedding_query_error", "embedding_index_error", "memory_compaction_error",
+    "adaptive_action_error", "adaptive_action_invalid", "adaptive_repeated_action", "adaptive_loop",
+    "adaptive_observation_invalid", "adaptive_tool_not_allowed", "adaptive_foreign_identifier",
+    "adaptive_context_limit", "adaptive_model_missing", "adaptive_timeout", "adaptive_budget_exhausted",
+})
+DIAGNOSTIC_TYPES = frozenset({
+    "IntegrationError", "ValueError", "RuntimeError", "ValidationError", "UnsupportedToolCall",
+    "TimeoutError", "ReadTimeout", "ConnectTimeout", "PoolTimeout", "HTTPStatusError",
+    "ConnectError", "ConnectionError", "OSError", "PermissionError", "JSONDecodeError",
+    "AdaptiveError",
+})
+DIAGNOSTIC_TOOLS = frozenset({
+    "web_search", "web_fetch", "web_research", "file_create", "file_read", "file_edit",
+    "image_generate", "gmail_search", "gmail_read", "gmail_reply", "gmail_send", "gmail_draft",
+    "calendar_read", "calendar_create", "calendar_update", "calendar_delete", "poker_bot",
+    "file_retrieve", "memory_query",
+})
+DIAGNOSTIC_STAGES = frozenset({
+    "retrieval", "planning", "tool_execution", "response_generation", "response_validation",
+    "feedback", "embedding_query", "embedding_index", "memory_compaction", "poker_decision",
+    "adaptive_tool",
+    "action_validation",
+})
+
+
+def failure_observations(run: AgentRun | None) -> dict:
+    """Associated structured evidence; no inference from private prose or root-cause claim."""
+    codes, types, tools, stages, validations = set(), set(), set(), set(), set()
+
+    def known(value, allowed):
+        return isinstance(value, str) and value in allowed
+
+    if run:
+        traces = run.evidence.get("traces", [])
+        for trace in traces[:256] if isinstance(traces, list) else []:
+            if not isinstance(trace, dict):
+                continue
+            if known(trace.get("error_code"), DIAGNOSTIC_CODES):
+                codes.add(trace["error_code"])
+            if known(trace.get("error_type"), DIAGNOSTIC_TYPES):
+                types.add(trace["error_type"])
+            if known(trace.get("stage"), DIAGNOSTIC_STAGES):
+                stages.add(trace["stage"])
+            if known(trace.get("validation"), DIAGNOSTIC_CODES):
+                validations.add(trace["validation"])
+                stages.add({"research_plan_error": "planning", "adaptive_action_error": "action_validation"}.get(trace["validation"], "response_validation"))
+            if (trace.get("error") or trace.get("error_code") or trace.get("error_type")) and known(trace.get("tool"), DIAGNOSTIC_TOOLS):
+                tools.add(trace["tool"])
+            result = trace.get("result", {})
+            errors = result.get("errors", []) if isinstance(result, dict) else []
+            for error in errors[:20] if isinstance(errors, list) else []:
+                if not isinstance(error, dict):
+                    continue
+                if known(error.get("tool"), DIAGNOSTIC_TOOLS):
+                    tools.add(error["tool"])
+                    stages.add("tool_execution")
+                if known(error.get("code"), DIAGNOSTIC_CODES):
+                    codes.add(error["code"])
+    return {"error_codes": sorted(codes), "error_types": sorted(types),
+            "failed_tools": sorted(tools), "stages": sorted(stages), "validations": sorted(validations)}
+
+
+def pattern_guidance(kind: str, evidence: dict) -> tuple[str, str]:
+    observed = set(evidence["error_codes"] + evidence["validations"])
+    if observed & {"adaptive_action_error", "adaptive_action_invalid", "adaptive_tool_not_allowed",
+                   "adaptive_foreign_identifier", "adaptive_repeated_action", "adaptive_loop"}:
+        return ("Replay the observed task with the recorded model and inspect the next-action schema, allowed tools/identifiers and no-repeat guard. A repeated action stops without another repair.",
+                "Return an invalid or repeated action; allow at most one schema repair; forbid foreign identifiers and duplicate tool execution.")
+    if "unsupported_tool_protocol" in observed:
+        return ("Replay a sanitized equivalent with the recorded model and check the single bounded repair, supported response protocol and replacement of partial output.",
+                "Reject unsupported tool output; allow one repair; preserve supplied evidence; fail honestly if the second attempt remains invalid.")
+    if "research_plan_error" in observed:
+        return ("Check the bounded query schema, distinct-query validation and application-built research plan at the recorded tool budget.",
+                "Use a malformed query response and verify one repair, deterministic dependencies and no invented fetch URLs.")
+    if observed & {"google_not_connected", "google_reconnect", "google_access_denied", "google_scopes_missing", "keyring_unavailable"}:
+        return ("Check the affected service's connection, granted scopes and enabled API, then retry a read-only request for the same account.",
+                "Simulate missing/revoked credentials and verify an explicit setup error without account fallback or external writes.")
+    if observed & {"approval_connection_changed", "approval_changed", "attachment_changed", "event_changed"}:
+        return ("Inspect the reviewed account/artifact version. This rejection can be an expected integrity guard; prepare a fresh proposal before any retry.",
+                "Change the account or reviewed bytes after proposing; confirmation must reject before sending a mutation.")
+    if "accepted_unverified" in observed:
+        return ("Inspect the returned artifact in Google before retrying; acceptance with failed verification must not cause a duplicate write.",
+                "Simulate successful mutation followed by failed verification; preserve the accepted ID and do not automatically resubmit.")
+    if observed & {"search_engines_unavailable", "search_forbidden", "search_unavailable", "search_failed", "searxng_missing", "invalid_search_response"}:
+        return ("Run an actual SearXNG JSON search and inspect engine failure labels/access restrictions; distinguish a real empty result from upstream failure.",
+                "Exercise forbidden, unavailable, partial-result and genuine-empty search responses with separate honest outcomes.")
+    if set(evidence["error_types"]) & {"TimeoutError", "ReadTimeout", "ConnectTimeout"} or observed & {"google_timeout", "fetch_timeout", "image_timeout", "search_timeout"}:
+        return ("Compare the recorded route/model latency and provider availability with a controlled warm/cold replay before changing a timeout.",
+                "Use a delayed provider and verify bounded cancellation, an explicit timeout and no duplicate external write.")
+    if "removed_unretrieved_citations" in observed:
+        return ("Compare answer links with returned evidence URLs. This check identifies unsupported links; factual support and freshness need a separate reviewed content case.",
+                "Generate a link absent from retrieved evidence; verify removal without treating surviving links as a factual-quality pass.")
+    if kind in {"embedding_query_error", "embedding_index_error", "memory_compaction_error"}:
+        return ("Check the configured embedding/summarizer role with a small isolated request and verify the recorded fallback or preserved source data.",
+                "Fail the configured provider; retain source messages and distinguish unavailable vector retrieval from observed lexical fallback.")
+    if kind == "invalid_poker_action":
+        return ("Inspect legal-action validation and measured repair/fallback counts for the recorded decisions; action legality alone does not establish playing quality.",
+                "Provide an illegal structured move and verify bounded repair plus a legal deterministic fallback.")
+    if kind in {"manual_problem", "negative_feedback", "regeneration"}:
+        return ("Review the linked local run and, only with private evidence enabled, the reported problem. Define the expected content outcome before adding a regression case.",
+                "Create a sanitized reproduction with a concrete expected answer or artifact; grade content separately from workflow completion.")
+    return ("Inspect the linked local run's structured evidence and reproduce the workflow. Missing error classification is unavailable evidence, not a diagnosed cause.",
+            "Add a sanitized case for the observed route and status with an explicit expected outcome after reproducing the problem.")
+
+
+def failure_patterns(session, events: list[FrictionEvent]) -> list[dict]:
+    ids = {event.run_id for event in events if event.run_id}
+    runs = {run.id: run for run in session.scalars(select(AgentRun).where(AgentRun.id.in_(ids)))} if ids else {}
+    grouped = {}
+    for event in events:
+        run = runs.get(event.run_id)
+        observed = failure_observations(run)
+        identity = {"kind": event.kind, "route": run.route if run else None,
+                    "model": run.model if run else None, "status": run.status if run else None, **observed}
+        signature = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+        if signature not in grouped:
+            recommendation, hint = pattern_guidance(event.kind, observed)
+            grouped[signature] = {**identity, "id": "pattern-" + hashlib.sha256(signature.encode()).hexdigest()[:16],
+                                  "count": 0, "run_ids": [], "event_ids": [], "run_count": 0,
+                                  "first_seen": event.created_at, "last_seen": event.created_at,
+                                  "classification": "structured_observations" if any(observed.values()) else "unclassified",
+                                  "recommendation": recommendation, "regression_hint": hint,
+                                  "private_examples": []}
+        pattern = grouped[signature]
+        pattern["count"] += 1
+        pattern["first_seen"] = min(pattern["first_seen"], event.created_at)
+        pattern["last_seen"] = max(pattern["last_seen"], event.created_at)
+        if event.id not in pattern["event_ids"] and len(pattern["event_ids"]) < 20:
+            pattern["event_ids"].append(event.id)
+        if run and run.id not in pattern["run_ids"]:
+            pattern["run_ids"].append(run.id)
+        if len(pattern["private_examples"]) < 3 and event.details:
+            pattern["private_examples"].append(event.details[:300])
+    patterns = sorted(grouped.values(), key=lambda item: (-item["count"], item["id"]))
+    for pattern in patterns:
+        pattern["run_count"] = len(pattern["run_ids"])
+        pattern["run_ids"] = pattern["run_ids"][:20]
+        pattern["links_capped"] = pattern["count"] > len(pattern["event_ids"]) or pattern["run_count"] > len(pattern["run_ids"])
+    return patterns
 
 
 def distribution(values: list[float]) -> dict:
@@ -87,6 +242,7 @@ def public_run(row: AgentRun, include_content=False) -> dict:
     }
     result["metrics"] = {key: value for key, value in metrics.items() if key in allowed}
     result["metrics_available"] = bool(metrics)
+    result["failure_observations"] = failure_observations(row)
     if include_content:
         result["private_local_evidence"] = bounded_private(row.evidence)
     return result
@@ -99,7 +255,7 @@ def public_report(row: HarnessReport, include_content=False) -> dict:
     public = {
         key: value
         for key, value in report.items()
-        if key not in {"findings", "regression_candidates", "cases", "private_error"}
+        if key not in {"findings", "regression_candidates", "cases", "private_error", "patterns"}
     }
     if "findings" in report:
         public["findings"] = [
@@ -108,6 +264,11 @@ def public_report(row: HarnessReport, include_content=False) -> dict:
         ]
         public["regression_candidate_count"] = len(report.get("regression_candidates", []))
         public["regression_candidates"] = []
+    if "patterns" in report:
+        public["patterns"] = [
+            {key: value for key, value in pattern.items() if not key.startswith("private_")}
+            for pattern in report["patterns"]
+        ]
     if "cases" in report:
         public["cases"] = [
             {key: value for key, value in case.items() if not key.startswith("private_")}

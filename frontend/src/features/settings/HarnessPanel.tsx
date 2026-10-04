@@ -5,6 +5,7 @@ import { Disclosure } from '../../components/Disclosure';
 import { ErrorNotice, Loading, formatDate } from '../../components/ui';
 import type { Settings } from '../../types';
 import type { Evaluation, Watchtower } from './harnessTypes';
+import { HarnessReports, type HarnessReport } from './HarnessReports';
 import './harness.css';
 
 const duration = (value: number | null | undefined) =>
@@ -31,7 +32,7 @@ export function HarnessPanel({
   const load = useCallback(async () => {
     const next = await request<Watchtower>('/harness');
     setData(next);
-    const latest = next.reports.find((row) => row.report.kind === 'evaluation');
+    const latest = next.reports.find((row): row is Evaluation => row.report.kind === 'evaluation');
     if (latest) setEvaluation(latest);
   }, []);
   useEffect(() => {
@@ -488,6 +489,19 @@ export function HarnessPanel({
         ) : (
           <p className="muted">No active evaluations recorded yet.</p>
         )}
+      </section>
+      <section className="section">
+        <h3>Failure patterns and regression candidates</h3>
+        <p className="subtle">
+          Exact groups use recorded route, model and structured failure evidence. Private examples
+          are available only through the diagnostic export opt-in.
+        </p>
+        <HarnessReports
+          reports={
+            data?.reports.filter((row): row is HarnessReport => row.report.kind !== 'evaluation') ??
+            null
+          }
+        />
       </section>
       <section className="section">
         <h3>Limits and evidence</h3>

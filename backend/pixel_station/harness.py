@@ -17,7 +17,7 @@ from .database import (
     now,
 )
 from .observability import runtime_versions, safe_configuration
-from .watchtower import diagnostic_bundle, measurements, public_report, public_run
+from .watchtower import diagnostic_bundle, failure_patterns, measurements, public_report, public_run
 
 router = APIRouter(prefix="/api/harness", tags=["harness"])
 SUGGESTIONS = {
@@ -42,10 +42,16 @@ def create_report(session: Session, settings=None) -> HarnessReport:
         )
     )
     counts = Counter(event.kind for event in events)
+    patterns = failure_patterns(session, events)
     report = {
         "kind": "passive",
         "window_days": days,
         "event_count": len(events),
+        "patterns": patterns[:100],
+        "pattern_count": len(patterns),
+        "patterns_capped": len(patterns) > 100,
+        "pattern_method": "Exact grouping by recorded kind, route, model, status and allowlisted structured error/validation/tool/stage observations. Raw error text is not parsed; unknown legacy errors remain unclassified.",
+        "interpretation": "Repeated observations help choose a reproduction and regression case; they do not establish root cause or answer correctness. Counts describe the capped event window, not independent failed requests.",
         "findings": [
             {
                 "kind": kind,
@@ -118,6 +124,14 @@ def inspect_harness(
 @router.post("/run")
 def run_harness(request: Request, session: Session = Depends(get_session)):
     return public_report(create_report(session, request.app.state.settings()))
+
+
+@router.get("/runs/{identity}")
+def inspect_run(identity: str, include_content: bool = False, session: Session = Depends(get_session)):
+    row = session.get(AgentRun, identity)
+    if not row:
+        raise HTTPException(404, "Recorded run not found")
+    return public_run(row, include_content)
 
 
 @router.get("/regressions")

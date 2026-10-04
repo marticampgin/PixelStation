@@ -289,9 +289,11 @@ def deterministic_cases() -> list[dict]:
             base64.urlsafe_b64decode(payload["raw"])
         )
         actual_attachments = list(decoded.iter_attachments())
-        body_preserved = decoded.get_body(preferencelist=("plain",)).get_content().rstrip(
-            "\r\n"
-        ) == email["body"].rstrip("\r\n")
+        plain_body = decoded.get_body(preferencelist=("plain",))
+        body_preserved = (
+            plain_body is not None
+            and plain_body.get_content().rstrip("\r\n") == email["body"].rstrip("\r\n")
+        )
         attachment_preserved = (
             len(actual_attachments) == 1
             and actual_attachments[0].get_payload(decode=True) == attachment

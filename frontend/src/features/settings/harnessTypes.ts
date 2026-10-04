@@ -1,3 +1,5 @@
+import type { HarnessReport } from './HarnessReports';
+
 export interface Distribution {
   sample_count: number;
   median: number | null;
@@ -48,7 +50,7 @@ export interface Evaluation {
   };
 }
 export interface Watchtower {
-  reports: Evaluation[];
+  reports: (Evaluation | HarnessReport)[];
   runs: RecordedRun[];
   events: { id: string; kind: string; created_at: string }[];
   defaults: Record<string, { default: number; reason: string }>;
