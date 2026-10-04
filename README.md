@@ -86,7 +86,7 @@ The primary SQLite database uses WAL, foreign keys and Alembic migrations. Files
 
 Backups include private conversations and files: store them as private data. The application does not collect telemetry or retain model chain-of-thought. Model/runtime packages may download open-source parsing weights when first needed; document processing then happens locally. Ordinary email content is not automatically turned into general long-term memory.
 
-Export snapshots the primary and nested SQLite databases and copies managed files, images, workflows and pending edit replacements. Credentials, keyring tokens, logs and caches are excluded. To restore, stop the app and extract the archive into the **same configured data directory**; managed file records currently contain absolute paths. Google authorization must be configured separately. There is no in-app restore or automatic path relocation.
+Export snapshots the primary and nested SQLite databases and copies managed files, images, workflows, pending edit replacements and reviewed outgoing email attachment snapshots. This includes earlier managed document revisions and the exact attachment bytes bound to pending mail reviews. Credentials, keyring tokens, logs and caches are excluded. To restore, stop the app and extract the archive into the **same configured data directory**; managed file records currently contain absolute paths. Google authorization must be configured separately. There is no in-app restore or automatic path relocation.
 
 ## Development
 

@@ -14,6 +14,7 @@ from sqlalchemy import select, text
 from pixel_station.app import create_app
 from pixel_station.database import Attachment, DocumentChunk
 from pixel_station.file_edits import (
+    LEGACY_TARGETED_SCOPE,
     FileEditProposal,
     FileRevision,
     PlannedTargetedEdit,
@@ -131,6 +132,193 @@ def test_xlsx_edit_preserves_other_sheets_styles_and_blocks_formula_input(client
     assert updated["Summary"]["A1"].value == "=SUM(Costs!B2:B10)"
     assert updated["Costs"]["A1"].font.bold
     assert updated["Costs"]["A2"].value == "'=HYPERLINK(1)"
+    assert updated["Costs"]["B2"].value == 20
+    assert updated["Costs"]["B2"].data_type == "n"
+
+
+def test_xlsx_review_preserves_unchanged_types_and_updates_typed_cells(client):
+    from datetime import datetime
+
+    from openpyxl import Workbook, load_workbook
+    from openpyxl.styles import Font
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["Amount", "Active", "Date", "Formula", "Text", "New"])
+    sheet.append([10, True, datetime(2099, 10, 16), "=A2*2", "001", None])
+    sheet["A2"].number_format = "0.00"
+    sheet["A2"].font = Font(italic=True)
+    output = io.BytesIO()
+    workbook.save(output)
+    original = upload(client, "typed.xlsx", output.getvalue())
+    current = client.get(f"/api/files/{original['id']}/edit-content").json()
+    assert "Unchanged cells" in current["warning"]
+    content = current["content"].replace("10,True,2099-10-16 00:00:00", "-25.5,False,2099-10-18")
+    content = content.replace("001,", "001,=DANGEROUS(1)")
+    proposal = propose(client, original["id"], content)
+    assert client.get(f"/api/files/{original['id']}/content").content == output.getvalue()
+    assert confirm(client, proposal["id"]).status_code == 200
+    updated = load_workbook(io.BytesIO(client.get(f"/api/files/{original['id']}/content").content))
+    row = updated.active
+    assert row["A2"].value == -25.5 and row["A2"].data_type == "n"
+    assert row["A2"].number_format == "0.00" and row["A2"].font.italic
+    assert row["B2"].value is False and row["B2"].data_type == "b"
+    assert row["C2"].value == datetime(2099, 10, 18)
+    assert row["D2"].value == "=A2*2" and row["D2"].data_type == "f"
+    assert row["E2"].value == "001" and row["E2"].data_type == "s"
+    assert row["F2"].value == "'=DANGEROUS(1)" and row["F2"].data_type == "s"
+
+
+@pytest.mark.parametrize("replacement", ["not a number", "=SUM(1)", "1e999"])
+def test_xlsx_rejects_invalid_numeric_type_without_changing_source(client, replacement):
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    workbook.active["A1"] = 23
+    output = io.BytesIO()
+    workbook.save(output)
+    original = upload(client, "number.xlsx", output.getvalue())
+    response = client.post(f"/api/files/{original['id']}/edit-proposals", json={"content": replacement})
+    assert response.status_code == 422
+    assert "finite number" in response.json()["detail"]
+    assert client.get(f"/api/files/{original['id']}/content").content == output.getvalue()
+
+
+def test_docx_indexes_header_footer_variants_and_tables_once(client):
+    from docx import Document
+    from docx.enum.section import WD_SECTION_START
+    from docx.shared import Inches
+
+    document = Document()
+    document.add_paragraph("Body reference")
+    section = document.sections[0]
+    section.header.paragraphs[0].text = "Shared header reference"
+    section.first_page_header.paragraphs[0].text = "First page header reference"
+    section.even_page_header.paragraphs[0].text = "Even page header reference"
+    section.footer.paragraphs[0].text = "Shared footer reference"
+    section.first_page_footer.add_table(rows=1, cols=1, width=Inches(3)).cell(0, 0).text = "Footer table reference"
+    document.add_section(WD_SECTION_START.NEW_PAGE)
+    output = io.BytesIO()
+    document.save(output)
+    original = upload(client, "stories.docx", output.getvalue())
+    chunks = client.get(f"/api/files/{original['id']}").json()["chunks"]
+    texts = "\n".join(chunk["text"] for chunk in chunks)
+    assert texts.count("Shared header reference") == 1
+    assert texts.count("Shared footer reference") == 1
+    assert "First page header reference" in texts and "Even page header reference" in texts
+    assert "Footer table reference" in texts
+    assert any("header" in chunk["location"] for chunk in chunks)
+    assert any("footer" in chunk["location"] for chunk in chunks)
+
+
+def checkbox_docx(*, locked=False, inconsistent=False):
+    from docx import Document
+    from lxml import etree
+
+    from pixel_station.docx_controls import C, W
+
+    document = Document(io.BytesIO(contract_docx()))
+    paragraph = document.add_paragraph("Sound service ")
+    control = etree.SubElement(paragraph._p, W + "sdt")
+    properties = etree.SubElement(control, W + "sdtPr")
+    etree.SubElement(properties, W + "alias").set(W + "val", "Sound system")
+    if locked:
+        etree.SubElement(properties, W + "lock").set(W + "val", "contentLocked")
+    checkbox = etree.SubElement(properties, C + "checkbox")
+    etree.SubElement(checkbox, C + "checked").set(C + "val", "0")
+    for name, value in (("checkedState", "2612"), ("uncheckedState", "2610")):
+        state = etree.SubElement(checkbox, C + name)
+        state.set(C + "val", value)
+        state.set(C + "font", "MS Gothic")
+    content = etree.SubElement(control, W + "sdtContent")
+    run = etree.SubElement(content, W + "r")
+    etree.SubElement(run, W + "t").text = "☒" if inconsistent else "☐"
+    paragraph = document.add_paragraph("Cleaning service ")
+    run = etree.SubElement(paragraph._p, W + "r")
+    begin = etree.SubElement(run, W + "fldChar")
+    begin.set(W + "fldCharType", "begin")
+    data = etree.SubElement(begin, W + "ffData")
+    etree.SubElement(data, W + "name").set(W + "val", "Cleaning")
+    checkbox = etree.SubElement(data, W + "checkBox")
+    etree.SubElement(checkbox, W + "default").set(W + "val", "1")
+    run = etree.SubElement(paragraph._p, W + "r")
+    etree.SubElement(run, W + "instrText").text = " FORMCHECKBOX "
+    run = etree.SubElement(paragraph._p, W + "r")
+    etree.SubElement(run, W + "fldChar").set(W + "fldCharType", "separate")
+    run = etree.SubElement(paragraph._p, W + "r")
+    etree.SubElement(run, W + "t").text = "☒"
+    run = etree.SubElement(paragraph._p, W + "r")
+    etree.SubElement(run, W + "fldChar").set(W + "fldCharType", "end")
+    output = io.BytesIO()
+    document.save(output)
+    return output.getvalue()
+
+
+def test_reviewed_word_checkbox_states_preserve_unrelated_parts_and_reindex(client):
+    source = checkbox_docx()
+    original = upload(client, "form.docx", source)
+    targets = client.get(f"/api/files/{original['id']}/edit-targets").json()
+    controls = targets["checkboxes"]
+    assert {control["kind"] for control in controls} == {"content_control", "legacy_field"}
+    assert {control["label"]: control["checked"] for control in controls} == {"Sound system": False, "Cleaning": True}
+    response = client.post(f"/api/files/{original['id']}/targeted-edit-proposals", json={
+        "before_sha256": original["sha256"], "checkbox_changes": [
+            {"location": control["location"], "before": control["checked"], "after": not control["checked"]}
+            for control in controls]})
+    assert response.status_code == 200, response.text
+    proposal = response.json()
+    assert proposal["changes"] == [] and len(proposal["checkbox_changes"]) == 2
+    assert "Before: unchecked" in proposal["preview_content"] and "After: checked" in proposal["preview_content"]
+    preview = client.get(f"/api/files/edit-proposals/{proposal['id']}/preview").content
+    with zipfile.ZipFile(io.BytesIO(source)) as before, zipfile.ZipFile(io.BytesIO(preview)) as after:
+        assert before.namelist() == after.namelist()
+        assert [name for name in before.namelist() if before.read(name) != after.read(name)] == ["word/document.xml"]
+    assert client.get(f"/api/files/{original['id']}/content").content == source
+    assert confirm(client, proposal["id"]).status_code == 200
+    assert confirm(client, proposal["id"]).status_code == 409
+    updated = client.get(f"/api/files/{original['id']}/edit-targets").json()
+    assert {control["label"]: control["checked"] for control in updated["checkboxes"]} == {"Sound system": True, "Cleaning": False}
+    chunks = client.get(f"/api/files/{original['id']}").json()["chunks"]
+    text = "\n".join(chunk["text"] for chunk in chunks)
+    assert "Sound system: checked" in text and "Cleaning: unchecked" in text
+
+
+@pytest.mark.parametrize("modification, expected", [
+    ("stale", 409), ("duplicate", 422), ("unknown", 422), ("same", 422), ("string-state", 422),
+])
+def test_checkbox_proposals_reject_unreviewed_or_ambiguous_states(client, modification, expected):
+    source = checkbox_docx()
+    original = upload(client, "form.docx", source)
+    control = client.get(f"/api/files/{original['id']}/edit-targets").json()["checkboxes"][0]
+    change = {"location": control["location"], "before": False, "after": True}
+    if modification == "stale":
+        change["before"] = True
+    elif modification == "unknown":
+        change["location"] = "word/document.xml:drawn-rectangle:0"
+    elif modification == "same":
+        change["after"] = False
+    elif modification == "string-state":
+        change["after"] = "true"
+    response = client.post(f"/api/files/{original['id']}/targeted-edit-proposals", json={
+        "before_sha256": original["sha256"],
+        "checkbox_changes": [change, change] if modification == "duplicate" else [change]})
+    assert response.status_code == expected
+    assert client.get(f"/api/files/{original['id']}/content").content == source
+
+
+@pytest.mark.parametrize("option", ["locked", "inconsistent"])
+def test_locked_or_inconsistent_controls_are_not_exposed_for_toggling(client, option):
+    original = upload(client, "limited-form.docx", checkbox_docx(**{option: True}))
+    targets = client.get(f"/api/files/{original['id']}/edit-targets").json()
+    assert [control["kind"] for control in targets["checkboxes"]] == ["legacy_field"]
+    assert targets["unsupported_checkbox_count"] == 1
+
+
+def test_text_replacements_cannot_bypass_checkbox_state_review(client):
+    original = upload(client, "form.docx", checkbox_docx())
+    response = targeted(client, original, [("Sound service", "☐", "☒")])
+    assert response.status_code == 422
+    assert "reviewed checkbox change" in response.json()["detail"]
 
 
 def test_docx_edit_preserves_tables_and_paragraph_styles(client):
@@ -355,6 +543,7 @@ def test_targeted_docx_edits_split_runs_tables_headers_and_footers_without_rebui
     assert all(change["matches"] == 1 for change in proposal["changes"])
     assert "Before:" in proposal["preview_content"] and "After:" in proposal["preview_content"]
     assert "first affected text run" in proposal["warning"]
+
     preview = client.get(f"/api/files/edit-proposals/{proposal['id']}/preview")
     assert preview.status_code == 200
     assert hashlib.sha256(preview.content).hexdigest() == proposal["after_sha256"]
@@ -388,6 +577,26 @@ def test_targeted_docx_edits_split_runs_tables_headers_and_footers_without_rebui
     assert confirm(client, proposal["id"]).status_code == 409
     assert client.get(f"/api/files/edit-proposals/{proposal['id']}/preview").status_code == 409
 
+
+
+def test_legacy_targeted_proposal_scope_still_deserializes_after_upgrade(client, app):
+    from pixel_station.file_edits import _digest, _public_proposal
+
+    original = upload(client, "legacy.docx", contract_docx())
+    response = targeted(client, original, [("Signature:", "01.10.2026", "02.10.2099")])
+    assert response.status_code == 200
+    proposal = response.json()
+    with app.state.database.session() as session:
+        row = session.get(FileEditProposal, proposal["id"])
+        row.scope = LEGACY_TARGETED_SCOPE
+        row.digest = _digest(row)
+        session.commit()
+        reloaded = _public_proposal(row)
+    assert reloaded["edit_mode"] == "targeted_text"
+    assert reloaded["changes"] == proposal["changes"]
+    assert reloaded["checkbox_changes"] == []
+    assert client.get(f"/api/files/edit-proposals/{proposal['id']}/preview").status_code == 200
+    assert confirm(client, proposal["id"]).status_code == 200
 
 @pytest.mark.parametrize("replacement,expected", [
     (("Date repeated", "Date", "TEST"), "found 2"),

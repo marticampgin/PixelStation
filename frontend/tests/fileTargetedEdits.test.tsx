@@ -120,6 +120,84 @@ describe('Targeted DOCX editing', () => {
     expect(proposed).not.toHaveBeenCalled();
   });
 
+  it('reviews changed Word checkbox states without submitting unchanged paragraphs', async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValue(json({ ...proposal, changes: [], checkbox_changes: [] }));
+    vi.stubGlobal('fetch', fetcher);
+    const user = userEvent.setup();
+    const control = {
+      location: 'word/document.xml:checkbox:content:0',
+      label: 'Sound system',
+      kind: 'content_control',
+      checked: false,
+    };
+    render(
+      <TargetedDocxEditor
+        document={{ ...document, checkboxes: [control] }}
+        onClose={vi.fn()}
+        onProposed={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Review file changes' })).toBeDisabled();
+    await user.click(screen.getByRole('checkbox', { name: 'Sound system' }));
+    await user.click(screen.getByRole('button', { name: 'Review file changes' }));
+    const payload = JSON.parse(fetcher.mock.calls[0][1].body);
+    expect(payload.before_sha256).toBe(hash);
+    expect(payload.changes).toEqual([]);
+    expect(payload.checkbox_changes).toEqual([
+      { location: control.location, before: false, after: true },
+    ]);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('supports a checkbox-only document and identifies unsupported Word controls', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json(proposal)));
+    const user = userEvent.setup();
+    render(
+      <TargetedDocxEditor
+        document={{
+          ...document,
+          targets: [],
+          checkboxes: [
+            { location: 'control-one', label: 'Cleaning', kind: 'legacy_field', checked: true },
+          ],
+          unsupported_checkbox_count: 1,
+        }}
+        onClose={vi.fn()}
+        onProposed={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole('button', { name: 'Add replacement' })).toBeDisabled();
+    expect(screen.getByText(/1 Word controls have locked/)).toBeVisible();
+    const control = screen.getByRole('checkbox', { name: 'Cleaning' });
+    expect(control).toBeChecked();
+    await user.click(control);
+    expect(screen.getByRole('button', { name: 'Review file changes' })).toBeEnabled();
+  });
+
+  it('shows the exact reviewed checkbox transition before confirmation', () => {
+    render(
+      <FileEditReview
+        proposal={{
+          ...proposal,
+          changes: [],
+          checkbox_changes: [
+            {
+              location: 'control-one',
+              label: 'Cleaning',
+              kind: 'legacy_field',
+              before: true,
+              after: false,
+            },
+          ],
+        }}
+      />,
+    );
+    expect(screen.getByText('Word form checkbox · Cleaning')).toBeVisible();
+    expect(screen.getByText('Before: checked → After: unchecked')).toBeVisible();
+  });
+
   it('aborts a dismissed review and ignores a late successful proposal', async () => {
     let resolve!: (response: Response) => void;
     const pending = new Promise<Response>((success) => {

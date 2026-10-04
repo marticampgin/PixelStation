@@ -17,6 +17,8 @@ export interface TargetedDocument {
   filename: string;
   before_sha256: string;
   targets: EditTarget[];
+  checkboxes?: { location: string; label: string; kind: string; checked: boolean }[];
+  unsupported_checkbox_count?: number;
   scope: string;
   warning: string;
 }
@@ -37,14 +39,24 @@ export function TargetedDocxEditor({
   onProposed: (proposal: FileEditProposal) => void;
 }) {
   const first = document.targets[0];
-  const [changes, setChanges] = useState<TextChange[]>([
-    { location: first.location, before: first.text, after: first.text },
-  ]);
+  const [changes, setChanges] = useState<TextChange[]>(
+    first ? [{ location: first.location, before: first.text, after: first.text }] : [],
+  );
+  const [checkboxStates, setCheckboxStates] = useState<Record<string, boolean>>({});
   const [plan, setPlan] = useState('Update the reviewed contract fields');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const pending = useRef<AbortController | null>(null);
   useEffect(() => () => pending.current?.abort(), []);
+  const reviewedChanges = changes.filter((change) => change.before !== change.after);
+  const checkboxChanges = (document.checkboxes ?? [])
+    .filter((control) => (checkboxStates[control.location] ?? control.checked) !== control.checked)
+    .map((control) => ({
+      location: control.location,
+      before: control.checked,
+      after: checkboxStates[control.location] ?? control.checked,
+    }));
+  const count = reviewedChanges.length + checkboxChanges.length;
 
   function update(index: number, patch: Partial<TextChange>) {
     setChanges((current) =>
@@ -61,7 +73,12 @@ export function TargetedDocxEditor({
     try {
       const proposal = await post<FileEditProposal>(
         `/files/${document.file_id}/targeted-edit-proposals`,
-        { before_sha256: document.before_sha256, plan, changes },
+        {
+          before_sha256: document.before_sha256,
+          plan,
+          changes: reviewedChanges,
+          ...(checkboxChanges.length ? { checkbox_changes: checkboxChanges } : {}),
+        },
         controller.signal,
       );
       if (!controller.signal.aborted) onProposed(proposal);
@@ -155,8 +172,9 @@ export function TargetedDocxEditor({
         <button
           type="button"
           className="text-button"
-          disabled={busy || changes.length >= 32}
+          disabled={busy || !first || changes.length + checkboxChanges.length >= 32}
           onClick={() =>
+            first &&
             setChanges((current) => [
               ...current,
               { location: first.location, before: first.text, after: first.text },
@@ -165,12 +183,41 @@ export function TargetedDocxEditor({
         >
           <Plus size={14} /> Add replacement
         </button>
+        {document.checkboxes?.length ? (
+          <fieldset className="targeted-edit-fields" disabled={busy}>
+            <legend>Word form checkboxes</legend>
+            <p className="subtle">
+              Select the desired state. Changed boxes appear in the review before they are applied.
+            </p>
+            {document.checkboxes.map((control) => (
+              <label key={control.location} className="toggle-field">
+                <input
+                  type="checkbox"
+                  checked={checkboxStates[control.location] ?? control.checked}
+                  onChange={(event) =>
+                    setCheckboxStates((current) => ({
+                      ...current,
+                      [control.location]: event.target.checked,
+                    }))
+                  }
+                />
+                {control.label}
+              </label>
+            ))}
+          </fieldset>
+        ) : null}
+        {document.unsupported_checkbox_count ? (
+          <p className="subtle">
+            {document.unsupported_checkbox_count} Word controls have locked, nested or unsupported
+            content and must be edited in Word.
+          </p>
+        ) : null}
         <ErrorNotice message={error} />
         <div className="modal-actions">
           <button
             className="button"
             disabled={
-              busy || changes.some((change) => !change.before || change.before === change.after)
+              busy || count === 0 || count > 32 || reviewedChanges.some((change) => !change.before)
             }
             type="submit"
           >

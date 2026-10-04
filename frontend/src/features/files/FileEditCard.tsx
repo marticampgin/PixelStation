@@ -17,6 +17,13 @@ export interface FileEditProposal {
   after_sha256?: string;
   expires_at?: string;
   changes?: { location: string; before: string; after: string; matches: number }[];
+  checkbox_changes?: {
+    location: string;
+    label: string;
+    kind: string;
+    before: boolean;
+    after: boolean;
+  }[];
 }
 
 export function FileEditReview({ proposal }: { proposal: FileEditProposal }) {
@@ -37,6 +44,15 @@ export function FileEditReview({ proposal }: { proposal: FileEditProposal }) {
           ))}
         </div>
       ) : null}
+      {proposal.checkbox_changes?.map((change) => (
+        <div key={change.location}>
+          <p className="subtle">Word form checkbox · {change.label}</p>
+          <p>
+            Before: {change.before ? 'checked' : 'unchecked'} → After:{' '}
+            {change.after ? 'checked' : 'unchecked'}
+          </p>
+        </div>
+      ))}
       <details open={!proposal.changes?.length}>
         <summary className="subtle">
           {proposal.changes?.length ? 'Review paragraph context' : 'Review replacement content'}

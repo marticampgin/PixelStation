@@ -17,6 +17,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from .database import Attachment, DocumentChunk, get_session, record_dict
+from .docx_controls import docx_checkboxes
 from .memory import fts_query
 from .vectors import SqliteVectorStore
 
@@ -133,6 +134,7 @@ class NativeFileParser:
             from docx import Document
 
             document = Document(str(path))
+            control_parts = {"word/document.xml": document.part.element}
             sections = []
             for paragraph in document.paragraphs:
                 if paragraph.text:
@@ -155,6 +157,34 @@ class NativeFileParser:
                         "location": f"table {number + 1}",
                     }
                 )
+            # A section may share its header/footer with an earlier section. Index
+            # each actual story once, including first-page and even-page variants.
+            seen_stories: set[str] = set()
+            for section in document.sections:
+                for kind in ("header", "footer"):
+                    for variant in (kind, "first_page_" + kind, "even_page_" + kind):
+                        story = getattr(section, variant)
+                        if story.is_linked_to_previous:
+                            continue
+                        location = str(story.part.partname).lstrip("/")
+                        if location in seen_stories:
+                            continue
+                        seen_stories.add(location)
+                        control_parts[location] = story.part.element
+                        for paragraph in story.paragraphs:
+                            if paragraph.text.strip():
+                                sections.append({"text": paragraph.text, "heading": kind.title(),
+                                                 "location": location})
+                        for number, table in enumerate(story.tables, 1):
+                            value = "\n".join(" | ".join(cell.text for cell in row.cells)
+                                              for row in table.rows)
+                            if value.strip():
+                                sections.append({"text": value, "heading": f"{kind.title()} table {number}",
+                                                 "location": f"{location} table {number}"})
+            controls, _ = docx_checkboxes(control_parts)
+            for control in controls.values():
+                sections.append({"text": f"{control.label}: {'checked' if control.checked else 'unchecked'}",
+                                 "heading": "Word form checkbox", "location": control.location})
             return sections
         if extension == ".xlsx":
             from openpyxl import load_workbook
@@ -261,6 +291,10 @@ class DocumentParser:
                 return parts, "native", warning
             try:
                 converted = DocumentConverter().convert(path)
+                stories = (native.parse(path, extension) if extension == ".docx" else [])
+                story_sections = [part for part in stories
+                                  if part["location"].startswith(("word/header", "word/footer"))
+                                  or part["heading"] == "Word form checkbox"]
                 return (
                     [
                         {
@@ -268,7 +302,7 @@ class DocumentParser:
                             "location": "document",
                             "heading": "",
                         }
-                    ],
+                    ] + story_sections,
                     "docling",
                     None,
                 )
